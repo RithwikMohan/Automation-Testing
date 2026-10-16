@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+backend/artifacts/
+chronos_timesheet_test_cases.csv
+chronos_timesheet_test_cases.xlsx
+
+# Local test data and generated reports
+*.csv
+*.xlsx
+*.webm
+*.png
