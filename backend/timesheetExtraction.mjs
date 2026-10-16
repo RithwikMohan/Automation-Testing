@@ -59,6 +59,10 @@ export function normalizeTimesheetSnapshot(snapshot) {
   if (!validDates.length) warnings.push('No readable date headers were found.')
   if (duplicateDates.length) warnings.push('Duplicate date headers were detected.')
   if (dates.length !== 7) warnings.push(`Detected ${dates.length} visible date columns; the usual weekly count is 7.`)
+  const dailyTotals = (snapshot?.daily_totals || []).map((total) => ({
+    date: total.date || null,
+    hours: typeof total.hours === 'number' ? total.hours : null,
+  })).filter((total) => total.date && total.hours !== null)
 
   const projects = (snapshot?.rows || []).map((row) => {
     const name = clean(row.project_name)
@@ -93,6 +97,7 @@ export function normalizeTimesheetSnapshot(snapshot) {
     },
     dates,
     projects,
+    daily_totals: dailyTotals,
     diagnostics: {
       project_rows_detected: projects.length,
       date_columns_detected: dates.length,
@@ -125,6 +130,7 @@ export async function extractTimesheet(page) {
       if (match && !dates.some((date) => date.label === match[0])) dates.push({ label: match[0], date: null, x: element.getBoundingClientRect().left + element.getBoundingClientRect().width / 2 })
     }
     const rows = []
+    const dailyTotals = []
     const isDeleteControl = (element) => {
       const content = [
         element.textContent || '',
@@ -198,6 +204,35 @@ export async function extractTimesheet(page) {
         rows.push({ project_id: projectId, project_name: projectName, cells })
       }
     }
+    const totalLabels = Array.from(body.querySelectorAll('*')).filter((element) => {
+      if (element.children.length) return false
+      return /^daily\s+total$/i.test((element.textContent || '').replace(/\s+/g, ' ').trim())
+    })
+    const minimumDateX = Math.min(...dates.map((date) => date.x))
+    for (const label of totalLabels) {
+      let totalRow = label.parentElement
+      while (totalRow && totalRow !== body) {
+        const rowText = (totalRow.innerText || '').replace(/\s+/g, ' ').trim()
+        const numericValues = Array.from(totalRow.querySelectorAll('input, td, [role="gridcell"], span, div'))
+          .filter((element) => !element.children.length)
+          .map((element) => {
+            const value = String(element.value ?? element.textContent ?? '').replace(/\s+/g, ' ').trim()
+            const rect = element.getBoundingClientRect()
+            return { value, x: rect.left + rect.width / 2 }
+          })
+          .filter((item) => /^\d+(?:[.,]\d+)?$/.test(item.value) && item.x > minimumDateX - 20)
+        if (/^daily\s+total\b/i.test(rowText) && numericValues.length >= dates.length) {
+          for (const date of dates) {
+            const candidate = numericValues
+              .map((item) => ({ ...item, distance: Math.abs(item.x - date.x) }))
+              .sort((left, right) => left.distance - right.distance)[0]
+            if (candidate && candidate.distance < 100) dailyTotals.push({ date: date.label, raw_value: candidate.value })
+          }
+          break
+        }
+        totalRow = totalRow.parentElement
+      }
+    }
     if (!rows.length && dates.length) {
       const visibleLeaves = Array.from(body.querySelectorAll('*')).filter((element) => {
         if (element.children.length || /SCRIPT|STYLE|NOSCRIPT/.test(element.tagName)) return false
@@ -261,7 +296,7 @@ export async function extractTimesheet(page) {
         })
       }
     }
-    return { fallbackYear, dates, rows }
+    return { fallbackYear, dates, rows, dailyTotals }
   })
   return normalizeTimesheetSnapshot({
     ...snapshot,
@@ -276,6 +311,14 @@ export async function extractTimesheet(page) {
         const year = match[3] ? Number(match[3].length === 2 ? `20${match[3]}` : match[3]) : snapshot.fallbackYear
         return isoDate(day, month, year)
       })(),
+    })),
+    daily_totals: snapshot.dailyTotals.map((total) => ({
+      date: (() => {
+        const label = total.date
+        const match = label.match(/(?:sun|mon|tue|wed|thu|fri|sat)(?:day)?\s+\d{1,2}[-/. ](?:[A-Za-z]{3,9}|\d{1,2})(?:[-/. ]\d{2,4})?/i)
+        return parseDateLabel(match?.[0] || '', snapshot.fallbackYear)
+      })(),
+      hours: Number(total.raw_value.replace(',', '.')),
     })),
   })
 }

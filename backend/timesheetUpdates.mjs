@@ -50,11 +50,17 @@ export function parseCsvText(csvText) {
   ]))
 }
 
-function parseDate(value) {
+export function normalizeDate(value) {
   const normalized = clean(value)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null
-  const date = new Date(`${normalized}T00:00:00Z`)
-  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== normalized ? null : normalized
+  const isoMatch = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  const dayFirstMatch = normalized.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/)
+  const year = isoMatch ? isoMatch[1] : dayFirstMatch?.[3]
+  const month = isoMatch ? isoMatch[2] : dayFirstMatch?.[2]
+  const day = isoMatch ? isoMatch[3] : dayFirstMatch?.[1]
+  if (!year || !month || !day) return null
+  const iso = `${year}-${month}-${day}`
+  const date = new Date(`${iso}T00:00:00Z`)
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== iso ? null : iso
 }
 
 function parseLogTime(value) {
@@ -74,9 +80,21 @@ export function validateUpdateBatch(rows, currentData) {
   const projects = currentData?.projects || []
   const dates = new Set((currentData?.dates || []).map((date) => date.date))
   const additions = new Map()
+  const currentDailyTotals = new Map()
+  for (const total of currentData?.daily_totals || []) {
+    if (typeof total.hours === 'number' && Number.isFinite(total.hours)) currentDailyTotals.set(total.date, total.hours)
+  }
+  const extractedTotals = currentDailyTotals.size > 0
+  for (const project of projects) {
+    for (const day of project.days || []) {
+      if (!extractedTotals && typeof day.hours === 'number' && Number.isFinite(day.hours)) {
+        currentDailyTotals.set(day.date, (currentDailyTotals.get(day.date) || 0) + day.hours)
+      }
+    }
+  }
 
   for (const row of rows || []) {
-    const date = parseDate(row.date)
+    const date = normalizeDate(row.date)
     const projectName = clean(row.project)
     const hours = parseLogTime(row['log time'])
     if (!date || !projectName || hours === null || !clean(row['user name']) || !clean(row.password)) {
@@ -97,43 +115,97 @@ export function validateUpdateBatch(rows, currentData) {
       perRow.push(result('NEEDS DATA', row, 'Current hours are not safely readable for the requested cell.'))
       continue
     }
-    const key = `${matches[0].project_name.toLowerCase()}|${date}`
+    const key = date
     additions.set(key, (additions.get(key) || 0) + hours)
     perRow.push({ row_number: row['row_number'], status: 'READY', message: 'Validated against the current read-only timesheet.', date, project_name: matches[0].project_name, requested_hours: hours, current_hours: day.hours, projected_hours: day.hours + hours, work_description: clean(row['work description']) || null })
   }
 
-  for (const [key, added] of additions) {
-    const [projectName, date] = key.split('|')
-    const project = projects.find((candidate) => clean(candidate.project_name).toLowerCase() === projectName)
-    const day = project.days.find((candidate) => candidate.date === date)
-    if (day.hours + added > 8) {
-      warnings.push(`Daily limit exceeded for ${project.project_name} on ${date}.`)
+  for (const [date, added] of additions) {
+    const projectedTotal = (currentDailyTotals.get(date) || 0) + added
+    if (projectedTotal > 8) {
+      warnings.push(`Daily limit exceeded on ${date}.`)
       for (const item of perRow) {
-        if (item.project_name === project.project_name && item.date === date) {
+        if (item.date === date && item.status === 'READY') {
           item.status = 'EXCEEDS LIMIT'
-          item.message = `Projected total is ${projectedHours(project, date, added).toFixed(1)} hours, above the 8-hour daily limit.`
+          item.message = `Projected daily total is ${projectedTotal.toFixed(1)} hours, above the 8-hour daily limit.`
         }
-      }
-
-      function projectedHours(project, date, added) {
-        const day = project.days.find((candidate) => candidate.date === date)
-        return day.hours + added
       }
     }
   }
-  const status = perRow.some((item) => item.status !== 'READY') ? 'INVALID' : 'READY'
+  const readyCount = perRow.filter((item) => item.status === 'READY').length
+  const status = readyCount === perRow.length ? 'READY' : readyCount > 0 ? 'PARTIAL' : 'INVALID'
   return { status, read_only: true, per_row: perRow, diagnostics: { warnings } }
 }
 
 export function prepareMockPersistence(currentData, validation) {
-  if (validation.status !== 'READY') return { status: 'INVALID', persisted: false, per_row: validation.per_row }
+  const readyRows = validation.per_row.filter((item) => item.status === 'READY')
+  if (readyRows.length === 0) return { status: 'INVALID', persisted: false, per_row: validation.per_row }
   const next = structuredClone(currentData)
-  for (const row of validation.per_row) {
+  for (const row of readyRows) {
     const project = next.projects.find((candidate) => candidate.project_name === row.project_name)
     const day = project.days.find((candidate) => candidate.date === row.date)
     day.hours += row.requested_hours
     day.hours_status = 'READ'
-    if (row.work_description) day.description = row.work_description
+    if (row.work_description) {
+      day.description = day.description
+        ? `${day.description}; ${row.work_description}`
+        : row.work_description
+    }
   }
   return { status: 'UPDATED', persisted: true, data: next, per_row: validation.per_row }
+}
+
+export function executeMockUpdate({ validatedData, latestData, validation, saveOutcome = 'success' }) {
+  const readyRows = validation.per_row.filter((item) => item.status === 'READY')
+  if (readyRows.length === 0) {
+    return { status: 'INVALID', persisted: false, retried: false, per_row: validation.per_row }
+  }
+
+  const staleValidation = validateUpdateBatch(
+    readyRows.map((row) => ({
+      'row_number': row.row_number,
+      'user name': 'validated-user',
+      password: 'validated-secret',
+      date: row.date,
+      project: row.project_name,
+      'log time': String(row.requested_hours),
+      'work description': row.work_description || '',
+    })),
+    latestData,
+  )
+  if (staleValidation.status !== 'READY') {
+    return { status: 'VERIFICATION FAILED', persisted: false, retried: false, reason: 'Timesheet changed after preflight validation.', per_row: staleValidation.per_row }
+  }
+  if (saveOutcome === 'failure') {
+    return { status: 'UPDATE FAILED', persisted: false, retried: false, reason: 'Mock Save returned an error.', per_row: validation.per_row }
+  }
+  if (saveOutcome === 'uncertain') {
+    return { status: 'UPDATE IN PROGRESS', persisted: false, retried: false, reason: 'Mock Save outcome was uncertain; no retry was attempted.', per_row: validation.per_row }
+  }
+  if (saveOutcome !== 'success') {
+    throw new Error(`Unsupported mock save outcome: ${saveOutcome}`)
+  }
+
+  const persisted = prepareMockPersistence(validatedData, validation)
+  const verification = validateUpdateBatch(
+    readyRows.map((row) => ({
+      'row_number': row.row_number,
+      'user name': 'validated-user',
+      password: 'validated-secret',
+      date: row.date,
+      project: row.project_name,
+      'log time': '0',
+      'work description': row.work_description || '',
+    })),
+    persisted.data,
+  )
+  const valuesVerified = readyRows.every((row) => {
+    const project = persisted.data.projects.find((candidate) => candidate.project_name === row.project_name)
+    const day = project?.days.find((candidate) => candidate.date === row.date)
+    return day?.hours === row.projected_hours && day?.hours_status === 'READ'
+  })
+  if (verification.status !== 'READY' || !valuesVerified) {
+    return { status: 'VERIFICATION FAILED', persisted: false, retried: false, reason: 'Mock persisted values could not be re-read.', per_row: verification.per_row }
+  }
+  return { status: 'UPDATED', persisted: true, retried: false, data: persisted.data, per_row: validation.per_row }
 }

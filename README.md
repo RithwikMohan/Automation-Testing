@@ -9,7 +9,9 @@ npm install
 npm run dev
 ```
 
-The frontend parses CSV files locally in the browser and provides a demo simulation. CSV uploads are limited to 25 MB. It does not send credentials to the backend unless a future integration explicitly wires the backend endpoint.
+The frontend parses CSV files locally in the browser and sends the CSV to the local backend when processing is requested. CSV uploads are limited to 25 MB. The dashboard contains no seeded run data; runs and case results come from PostgreSQL.
+
+PostgreSQL is configured with `DATABASE_URL` in the local `.env`. The backend uses it only for application data persistence; never commit the connection string or share it in chat.
 
 ## Read-only Playwright service
 
@@ -87,17 +89,20 @@ The update foundation is intentionally disabled by default:
 ```env
 ORACLE_WRITE_ENABLED=false
 AUTOMATION_READ_ONLY=true
+AUTO_UPDATE_ON_UPLOAD=false
 ```
+
+When `AUTO_UPDATE_ON_UPLOAD=true`, the upload page starts the backend update workflow immediately after parsing a CSV. This does not bypass safety controls: live changes still require `ORACLE_WRITE_ENABLED=true` and `AUTOMATION_READ_ONLY=false`. With the default read-only configuration, the backend returns a sanitized disabled result and does not launch a browser for the update request.
 
 CSV updates require these normalized headers: `user name`, `password`, `date`, `project`, `log time`, and `work description`. The backend preflight validator matches projects case-insensitively, validates visible dates and current hours, aggregates same-day additions, and enforces the eight-hour daily limit. Invalid, unmatched, ambiguous, disabled, leave, and unreadable cells are rejected before any write.
 
 Live Oracle writes are not enabled or exercised. The mock persistence tests verify the update and post-write comparison shape without clicking Save or changing production data. Enabling writes requires explicit application-owner approval and separate verification of the live input and Save controls.
 
-The guarded update route is `POST /api/v1/oracle/timesheet/update` with `{ "csvText": "..." }`. While writes are disabled it validates only that the CSV is well-formed, returns `UPDATE FAILED`, and launches no browser. It never returns parsed passwords or CSV row contents.
+The guarded update route is `POST /api/v1/oracle/timesheet/update` with `{ "csvText": "..." }`. While writes are disabled it validates only that the CSV is well-formed, returns `UPDATE FAILED` for every row, and launches no browser. It never returns parsed passwords or CSV row contents. Each batch is persisted as one upload-level PostgreSQL run, including invalid, rejected, and failed rows, while isolated browser recordings and screenshots are attached to that run. When explicitly enabled, the route performs a complete per-user read-only preflight before opening fresh write contexts, re-reads each target cell immediately before editing, adds hours, appends descriptions, saves through the verified controls, and independently verifies the persisted hour values. An uncertain save is not retried automatically.
 
 ## CSV format
 
-The upload preview accepts either the demo headers `username`, `date`, `hours`, and `workdescription`, or the Phase 4 headers `user name`, `password`, `date`, `project`, `log time`, and `work description`. Existing hours are shown as unavailable in this local preview; the frontend never fabricates current timesheet values. Passwords are parsed only as part of the local file operation and are not displayed or stored.
+The upload preview accepts either the legacy headers `username`, `date`, `hours`, and `workdescription`, or the Phase 4 headers `user name`, `password`, `date`, `project`, `log time`, and `work description`. Existing hours are shown as unavailable until read-only Oracle validation or processing; the frontend never fabricates current timesheet values. Passwords are parsed only as part of the upload operation and are not displayed or stored.
 
 Do not commit real credentials or production CSV files. Use [examples/phase4-sanitized.csv](examples/phase4-sanitized.csv) as a template and provide credentials only at runtime.
 

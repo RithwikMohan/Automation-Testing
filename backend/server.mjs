@@ -1,18 +1,20 @@
 import 'dotenv/config'
 import { createServer } from 'node:http'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { chromium } from 'playwright'
 import { findTimesheetControl, waitForTimesheetGrid } from './timesheetNavigation.mjs'
 import { extractTimesheet } from './timesheetExtraction.mjs'
 import { parseCsvText, validateUpdateBatch } from './timesheetUpdates.mjs'
+import { findArtifact, initializeDatabase, listPersistedRuns, persistArtifacts, persistBatchResult, persistResult } from './database.mjs'
 
 const port = Number(process.env.PORT || 8787)
 const artifactRoot = resolve(process.env.ARTIFACT_DIR || 'backend/artifacts')
 const loginUrl = process.env.ORACLE_LOGIN_URL || process.env.ORACLE_BASE_URL
 const readOnly = process.env.AUTOMATION_READ_ONLY !== 'false'
 const writeEnabled = process.env.ORACLE_WRITE_ENABLED === 'true'
+const autoUpdateOnUpload = process.env.AUTO_UPDATE_ON_UPLOAD === 'true'
 
 if (!loginUrl) {
   throw new Error('ORACLE_LOGIN_URL or ORACLE_BASE_URL must be configured.')
@@ -100,6 +102,7 @@ async function serveVideo(request, response) {
     json(response, 404, { error: 'Recording is not available.' })
     return true
   }
+
   const content = await readFile(join(artifactRoot, artifactId, video))
   response.writeHead(200, {
     'content-type': 'video/webm',
@@ -111,7 +114,98 @@ async function serveVideo(request, response) {
   return true
 }
 
-async function validateLogin({ username, password, caseId }) {
+async function servePersistedArtifact(request, response) {
+  const match = request.url.match(/^\/api\/runs\/([^/]+)\/artifacts\/([^/?]+)(?:\?(.+))?$/)
+  if (!match) return false
+  const runId = decodeURIComponent(match[1])
+  const kind = decodeURIComponent(match[2])
+  const caseId = new URL(`http://localhost${request.url}`).searchParams.get('case_id')
+  if (!/^[a-zA-Z0-9-]+$/.test(runId) || !/^[a-zA-Z0-9_-]+$/.test(kind)) {
+    json(response, 400, { error: 'Invalid artifact reference.' })
+    return true
+  }
+  const artifact = await findArtifact(runId, kind, caseId)
+  if (!artifact) {
+    json(response, 404, { error: 'Artifact is not available.' })
+    return true
+  }
+  const artifactPath = resolve(artifact.file_path)
+  const rootPrefix = `${artifactRoot}${artifactRoot.endsWith('\\') ? '' : '\\'}`
+  if (!artifactPath.startsWith(rootPrefix) || !(await stat(artifactPath).then(() => true).catch(() => false))) {
+    json(response, 404, { error: 'Artifact is not available.' })
+    return true
+  }
+  const content = await readFile(artifactPath)
+  response.writeHead(200, {
+    'content-type': artifact.content_type,
+    'content-length': content.length,
+    'cache-control': 'no-store',
+    'access-control-allow-origin': 'http://localhost:5173',
+  })
+  response.end(content)
+  return true
+}
+
+async function persistArtifactResult(result, artifactDir) {
+  const files = (await readdir(artifactDir)).filter((file) => file !== 'result.json').map((file) => ({
+    kind: file.toLowerCase().endsWith('.webm') ? 'recording' : file.toLowerCase().endsWith('.png') ? 'screenshot' : 'result',
+    path: join(artifactDir, file),
+    contentType: file.toLowerCase().endsWith('.webm') ? 'video/webm' : file.toLowerCase().endsWith('.png') ? 'image/png' : 'application/octet-stream',
+  }))
+  await persistResult(result, artifactDir, files)
+}
+
+async function writeValidatedTimesheet(page, rows, currentData) {
+  const validation = validateUpdateBatch(rows, currentData)
+  const readyRows = validation.per_row.filter((item) => item.status === 'READY')
+  if (readyRows.length === 0) return { status: 'INVALID', per_row: validation.per_row, diagnostics: validation.diagnostics }
+  const targets = []
+  for (const row of readyRows) {
+    const projectCell = page.locator('.project-name-cell').filter({ has: page.locator('.project-name-text', { hasText: new RegExp(`^${String(row.project_name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }) }).first()
+    if (await projectCell.count() !== 1) return { status: 'PROJECT MISMATCH', per_row: validation.per_row }
+    const projectId = await projectCell.locator('[data-project-id]').getAttribute('data-project-id')
+    const input = page.locator(`input.hours-input.ts-cell[data-project="${projectId}"][data-date="${row.date}"]`)
+    if (!projectId || await input.count() !== 1) return { status: 'NEEDS DATA', per_row: validation.per_row }
+    const raw = await input.inputValue()
+    const currentHours = Number(raw)
+    if (!Number.isFinite(currentHours) || currentHours < 0) return { status: 'NEEDS DATA', per_row: validation.per_row }
+    targets.push({ row, input, currentHours, projectedHours: currentHours + row.requested_hours })
+  }
+  if (targets.some((target) => target.projectedHours > 8)) {
+    return { status: 'EXCEEDS LIMIT', per_row: targets.map((target) => ({ row_number: target.row.row_number, status: target.projectedHours > 8 ? 'EXCEEDS LIMIT' : 'READY', message: target.projectedHours > 8 ? `Projected total is ${target.projectedHours.toFixed(1)} hours, above the 8-hour daily limit.` : 'Validated.' })) }
+  }
+  for (const target of targets) {
+    const reread = Number(await target.input.inputValue())
+    if (reread !== target.currentHours) return { status: 'VERIFICATION FAILED', per_row: validation.per_row }
+    await target.input.fill(String(target.projectedHours))
+    if (target.row.work_description) {
+      await target.input.dblclick()
+      const description = page.locator('#wd-description')
+      await description.waitFor({ state: 'visible' })
+      const existing = (await description.inputValue()).trim()
+      await description.fill(existing ? `${existing}; ${target.row.work_description}` : target.row.work_description)
+      await page.locator('#wd-save').click()
+      await description.waitFor({ state: 'hidden' }).catch(() => {})
+    }
+  }
+  await page.locator('#save-timesheet-btn').click()
+  await page.waitForTimeout(1_000)
+  for (const target of targets) {
+    const persisted = Number(await target.input.inputValue())
+    if (persisted !== target.projectedHours) return { status: 'VERIFICATION FAILED', per_row: validation.per_row }
+  }
+  return {
+    status: 'UPDATED',
+    persisted: true,
+    per_row: validation.per_row.map((item) => {
+      const target = targets.find((t) => t.row.row_number === item.row_number)
+      if (target) return { row_number: item.row_number, status: 'UPDATED', message: 'Hours and work description were saved and verified.', current_hours: target.currentHours, updated_hours: target.projectedHours }
+      return item
+    }),
+  }
+}
+
+async function validateLogin({ username, password, caseId, updateRows, persist = true, artifactRunId }) {
   const safeCaseId = caseId ? String(caseId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) : 'case'
   const jobId = `${Date.now()}-${randomUUID()}`
   const artifactDir = join(artifactRoot, jobId)
@@ -249,9 +343,14 @@ async function validateLogin({ username, password, caseId }) {
         throw new Error(result.navigationMessage)
       }
     }
-    if (readOnly) return result
-
-    throw new Error('Write operations are disabled until explicit backend verification is complete.')
+    if (!updateRows) return result
+    if (readOnly || !writeEnabled) throw new Error('Live writes are disabled by configuration.')
+    const updateResult = await writeValidatedTimesheet(page, updateRows, result.timesheetData)
+    result.status = updateResult.status
+    result.updateResult = updateResult
+    result.readOnly = false
+    result.message = updateResult.status === 'UPDATED' ? 'Validated updates were saved and independently verified.' : 'No live update was confirmed.'
+    return result
   } catch (error) {
     result.message = sanitizedError(error)
     await page.screenshot({ path: join(artifactDir, `${safeCaseId}-failure.png`), fullPage: true }).catch(() => {})
@@ -261,6 +360,22 @@ async function validateLogin({ username, password, caseId }) {
     result.recordingAvailable = true
     await browser.close().catch(() => {})
     await writeFile(join(artifactDir, 'result.json'), JSON.stringify(result, null, 2), 'utf8')
+    if (persist) {
+      try {
+        await persistArtifactResult(result, artifactDir)
+      } catch (databaseError) {
+        console.error(`Failed to persist run ${jobId}:`, sanitizedError(databaseError))
+      }
+    } else if (artifactRunId) {
+      const files = (await readdir(artifactDir)).filter((file) => file !== 'result.json').map((file) => ({
+        kind: file.toLowerCase().endsWith('.webm') ? 'recording' : file.toLowerCase().endsWith('.png') ? 'screenshot' : 'result',
+        path: join(artifactDir, file),
+        contentType: file.toLowerCase().endsWith('.webm') ? 'video/webm' : file.toLowerCase().endsWith('.png') ? 'image/png' : 'application/octet-stream',
+      }))
+      await persistArtifacts(artifactRunId, result.caseId, files).catch((databaseError) => {
+        console.error(`Failed to persist artifacts for ${artifactRunId}:`, sanitizedError(databaseError))
+      })
+    }
   }
 }
 
@@ -269,6 +384,21 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url === '/api/artifacts') {
     return json(response, 200, await listArtifacts())
   }
+  if (request.method === 'GET' && request.url === '/api/runs') {
+    try {
+      return json(response, 200, await listPersistedRuns())
+    } catch (error) {
+      return json(response, 503, { error: sanitizedError(error) })
+    }
+  }
+  if (request.method === 'GET' && request.url === '/api/config') {
+    return json(response, 200, {
+      auto_update_on_upload: autoUpdateOnUpload,
+      read_only: readOnly,
+      writes_enabled: writeEnabled && !readOnly,
+    })
+  }
+  if (request.method === 'GET' && await servePersistedArtifact(request, response)) return
   if (request.method === 'GET' && await serveVideo(request, response)) return
   if (request.method !== 'POST' || !['/api/automation/validate-login', '/api/v1/oracle/timesheet/read', '/api/v1/oracle/timesheet/read-batch', '/api/v1/oracle/timesheet/update'].includes(request.url)) {
     return json(response, 404, { error: 'Not found.' })
@@ -278,42 +408,87 @@ const server = createServer(async (request, response) => {
     const body = await readJson(request)
     if (request.url === '/api/v1/oracle/timesheet/read-batch') {
       const rows = parseCsvText(requiredString(body.csvText, 'csvText'))
-      const users = new Map()
-      for (const row of rows) {
-        const key = `${row['user name']}\u0000${row.password}`
-        if (!users.has(key)) users.set(key, [])
-        users.get(key).push(row)
-      }
+      const runId = `upload-${Date.now()}-${randomUUID()}`
+      await persistBatchResult({ runId, source: body.caseId, status: 'RUNNING', readOnly: true, rows: [], perRow: [] })
       const perRow = []
-      for (const userRows of users.values()) {
-        const loginResult = await validateLogin({ username: userRows[0]['user name'], password: userRows[0].password, caseId: body.caseId })
-        if (loginResult.status !== 'AUTHENTICATED_READ_ONLY' || !loginResult.timesheetData) {
-          for (const row of userRows) perRow.push({ row_number: row.row_number, status: 'NEEDS DATA', message: 'Read-only authentication or timesheet access failed.' })
+      for (const row of rows) {
+        const caseId = `TC-${String(row.row_number - 1).padStart(3, '0')}`
+        if (!row['user name'] || !row.password) {
+          perRow.push({ row_number: row.row_number, status: 'INVALID', message: 'Username and password are required.' })
           continue
         }
-        const validation = validateUpdateBatch(userRows, loginResult.timesheetData)
-        perRow.push(...validation.per_row)
+        const loginResult = await validateLogin({ username: row['user name'], password: row.password, caseId, persist: false, artifactRunId: runId })
+        if (loginResult.status !== 'AUTHENTICATED_READ_ONLY' || !loginResult.timesheetData) {
+          perRow.push({ row_number: row.row_number, status: 'NEEDS DATA', message: 'Read-only authentication or timesheet access failed.' })
+          continue
+        }
+        perRow.push(...validateUpdateBatch([row], loginResult.timesheetData).per_row)
       }
+      const status = perRow.every((row) => row.status === 'READY') ? 'READY' : perRow.some((row) => row.status === 'READY') ? 'PARTIAL' : 'INVALID'
+      await persistBatchResult({ runId, source: body.caseId, status, readOnly: true, rows, perRow })
       return json(response, 200, {
-        status: perRow.every((row) => row.status === 'READY') ? 'READY' : 'INVALID',
+        status,
         read_only: true,
+        run_id: runId,
         per_row: perRow,
       })
     }
     if (request.url === '/api/v1/oracle/timesheet/update') {
       const rows = parseCsvText(requiredString(body.csvText, 'csvText'))
       if (!writeEnabled || readOnly) {
+        const perRow = rows.map((row) => ({
+          row_number: row.row_number,
+          status: 'UPDATE FAILED',
+          message: 'Live Oracle writes are disabled by server configuration.',
+        }))
+        const runId = `upload-${Date.now()}-${randomUUID()}`
+        await persistBatchResult({ runId, source: body.caseId, status: 'UPDATE FAILED', readOnly: true, rows, perRow })
         return json(response, 409, {
           status: 'UPDATE FAILED',
           read_only: true,
           message: 'Live Oracle writes are disabled. No browser was launched and no timesheet data was changed.',
           diagnostics: { csv_rows_received: rows.length, writes_enabled: false },
+          run_id: runId,
+          per_row: perRow,
         })
       }
-      return json(response, 501, {
-        status: 'UPDATE FAILED',
+      const runId = `upload-${Date.now()}-${randomUUID()}`
+      await persistBatchResult({ runId, source: body.caseId, status: 'RUNNING', readOnly: false, rows: [], perRow: [] })
+      const perRow = []
+      for (const row of rows) {
+        const caseId = `TC-${String(row.row_number - 1).padStart(3, '0')}`
+        let result
+        if (!row['user name'] || !row.password || !row.date || !row.project || !row['log time']) {
+          result = { updateResult: { status: 'INVALID', per_row: [{ row_number: row.row_number, status: 'INVALID', message: 'Required row data is missing or invalid.' }] } }
+        } else {
+          result = await validateLogin({
+            username: row['user name'],
+            password: row.password,
+            caseId,
+            updateRows: [row],
+            persist: false,
+            artifactRunId: runId,
+          })
+        }
+        const item = result.updateResult?.per_row?.[0] || {
+          row_number: row.row_number,
+          status: result.status === 'AUTHENTICATED_READ_ONLY' ? 'UPDATE FAILED' : 'UPDATE FAILED',
+          message: result.message || 'No update result was returned.',
+        }
+        perRow.push(item)
+      }
+      const status = perRow.every((item) => item.status === 'UPDATED')
+        ? 'UPDATED'
+        : perRow.some((item) => item.status === 'UPDATED')
+          ? 'PARTIAL'
+          : 'UPDATE FAILED'
+      await persistBatchResult({ runId, source: body.caseId, status, readOnly: false, rows, perRow })
+      return json(response, status === 'UPDATED' || status === 'PARTIAL' ? 200 : 422, {
+        status,
         read_only: false,
-        message: 'The live Oracle write workflow is not enabled until its controls are explicitly verified.',
+        run_id: runId,
+        per_row: perRow,
+        message: status === 'UPDATED' ? 'All validated updates were saved and verified.' : status === 'PARTIAL' ? 'Valid test cases were updated; failed cases were not changed.' : 'No test case update was confirmed.',
       })
     }
     const username = requiredString(body.username, 'username')
@@ -325,7 +500,15 @@ const server = createServer(async (request, response) => {
   }
 })
 
-server.listen(port, () => {
-  console.log(`Chronos automation service listening on http://localhost:${port}`)
-  console.log(`Read-only mode: ${readOnly ? 'enabled' : 'disabled by configuration'}`)
-})
+initializeDatabase()
+  .then(() => {
+    server.listen(port, () => {
+      console.log(`Chronos automation service listening on http://localhost:${port}`)
+      console.log(`Read-only mode: ${readOnly ? 'enabled' : 'disabled by configuration'}`)
+      console.log('PostgreSQL persistence: enabled')
+    })
+  })
+  .catch((error) => {
+    console.error(`Database initialization failed: ${sanitizedError(error)}`)
+    process.exitCode = 1
+  })

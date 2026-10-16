@@ -93,6 +93,24 @@ test('extracts project rows and visible inputs from a mock APEX page', async () 
   await browser.close()
 })
 
+test('extracts the authoritative daily total row', async () => {
+  const { chromium } = await import('playwright')
+  const browser = await chromium.launch({ headless: true })
+  const page = await browser.newPage({ viewport: { width: 1200, height: 800 } })
+  const headers = dates.map((label, index) => `<div style="position:absolute;left:${120 + index * 100}px;top:20px;width:80px">${label}</div>`).join('')
+  const rows = ['cloud spm', 'zoho application', 'project R'].map((name, row) => `
+    <div class="project-row" style="position:absolute;left:0;top:${100 + row * 60}px">
+      <span>${name}</span><button>Delete</button>
+      ${dates.map((_, index) => `<input style="position:absolute;left:${120 + index * 100}px;width:40px" value="${row === 0 && index === 3 ? '6' : '0'}">`).join('')}
+    </div>
+  `).join('')
+  const totals = dates.map((_, index) => `<td style="position:absolute;left:${120 + index * 100}px;width:80px">${index === 3 ? '6' : '0'}</td>`).join('')
+  await page.setContent(`<main>${headers}${rows}<table><tr><td>Daily Total</td>${totals}</tr></table></main>`)
+  const result = await extractTimesheet(page)
+  assert.equal(result.daily_totals.find((total) => total.date === '2026-10-15')?.hours, 6)
+  await browser.close()
+})
+
 test('keeps project names and hours isolated to their own rows', async () => {
   const { chromium } = await import('playwright')
   const browser = await chromium.launch({ headless: true })
