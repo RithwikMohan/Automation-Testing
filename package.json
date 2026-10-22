@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "backend": "node backend/server.mjs",
     "db:view": "node backend/viewDatabase.mjs",
-    "test:backend": "node --test backend/*.test.mjs"
+    "test:backend": "node --test backend/*.test.mjs",
+    "test:database-integration": "node --test backend/database.integration.mjs"
   },
   "dependencies": {
     "framer-motion": "^11.11.17",

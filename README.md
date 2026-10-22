@@ -82,6 +82,16 @@ npm run test:backend
 
 The tests use local APEX-like HTML fixtures for successful menu discovery, missing navigation controls, navigation/grid timeouts, and grid evidence checks. They do not contact Oracle.
 
+## Phase 1 PostgreSQL integration tests
+
+The mock-backed database CRUD tests run with `npm run test:backend`. Real PostgreSQL integration checks are separate and require a dedicated Neon branch:
+
+1. Create a Neon branch named `chronos-test`; do not point integration tests at the production endpoint.
+2. Set `TEST_DATABASE_URL` to that branch's connection URL in the ignored local `.env` file and set `CHRONOS_TEST_BRANCH_NAME=chronos-test`.
+3. Run `npm run test:database-integration`.
+
+The integration test refuses to write unless both URLs are configured, the branch confirmation matches, and the test endpoint hostname differs from `DATABASE_URL`. It uses generated IDs and removes only the exact test application and definitions it created. It does not initialize or alter the Oracle timesheet tables.
+
 ## Phase 4 update safeguards
 
 The update foundation is intentionally disabled by default:
@@ -109,3 +119,9 @@ Do not commit real credentials or production CSV files. Use [examples/phase4-san
 ## Structure
 
 The demo is intentionally compact while preserving separations between shell navigation, upload/validation, run inspection, recordings, reporting, settings, and the backend automation boundary.
+
+## Phase 2.1 generic browser exploration security gate
+
+Generic browser exploration is not enabled. This service does not yet have a controlled outbound proxy or equivalent network boundary that can pin approved destinations and block private, link-local, metadata, cross-origin, and redirect destinations. Playwright request interception by itself is not an adequate SSRF boundary, so Chronos does not expose a generic browser-launch API or start a browser for registered applications. No exploration results table or schema migration has been added.
+
+The Applications page displays this limitation. The backend binds to `127.0.0.1` because the application has no user authentication or authorization layer. Existing Oracle APEX automation remains separate and retains its `AUTOMATION_READ_ONLY=true`, `ORACLE_WRITE_ENABLED=false`, and `AUTO_UPDATE_ON_UPLOAD=false` safeguards. Generic exploration requires a separately reviewed egress enforcement mechanism and corresponding security tests before it can be enabled.

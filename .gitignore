@@ -11,3 +11,6 @@ chronos_timesheet_test_cases.xlsx
 *.webm
 *.png
 .vscode/
+
+debug.log
+src/App.tsx.bak

@@ -6,8 +6,31 @@ import { join, resolve } from 'node:path'
 import { chromium } from 'playwright'
 import { findTimesheetControl, waitForTimesheetGrid } from './timesheetNavigation.mjs'
 import { extractTimesheet } from './timesheetExtraction.mjs'
+import { phase1ErrorDetails } from './apiErrors.mjs'
 import { parseCsvText, validateUpdateBatch } from './timesheetUpdates.mjs'
-import { findArtifact, initializeDatabase, listPersistedRuns, persistArtifacts, persistBatchResult, persistResult } from './database.mjs'
+import {
+  archiveApplication,
+  archiveAutomationDefinition,
+  createApplication,
+  createAutomationDefinition,
+  duplicateAutomationDefinition,
+  findArtifact,
+  getApplicationById,
+  getAutomationDefinitionById,
+  initializeDatabase,
+  listApplications,
+  listAutomationDefinitions,
+  listPersistedRuns,
+  persistArtifacts,
+  persistBatchResult,
+  persistResult,
+  updateApplication,
+  updateAutomationDefinition,
+} from './database.mjs'
+import {
+  validateApplicationPayload,
+  validateAutomationDefinitionPayload,
+} from './validation.mjs'
 
 const port = Number(process.env.PORT || 8787)
 const artifactRoot = resolve(process.env.ARTIFACT_DIR || 'backend/artifacts')
@@ -15,6 +38,7 @@ const loginUrl = process.env.ORACLE_LOGIN_URL || process.env.ORACLE_BASE_URL
 const readOnly = process.env.AUTOMATION_READ_ONLY !== 'false'
 const writeEnabled = process.env.ORACLE_WRITE_ENABLED === 'true'
 const autoUpdateOnUpload = process.env.AUTO_UPDATE_ON_UPLOAD === 'true'
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173'
 
 if (!loginUrl) {
   throw new Error('ORACLE_LOGIN_URL or ORACLE_BASE_URL must be configured.')
@@ -24,9 +48,9 @@ function json(response, status, body) {
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
-    'access-control-allow-origin': 'http://localhost:5173',
+    'access-control-allow-origin': corsOrigin,
     'access-control-allow-headers': 'content-type',
-    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
   })
   response.end(JSON.stringify(body))
 }
@@ -44,6 +68,11 @@ function sanitizedError(error) {
     .replace(/password|passwd|pwd/gi, '[redacted-field]')
     .replace(/https?:\/\/\S+/gi, '[redacted-url]')
     .slice(0, 500)
+}
+
+function phase1Error(response, error) {
+  const details = phase1ErrorDetails(error)
+  return json(response, details.status, { error: details.error })
 }
 
 function requiredString(value, name) {
@@ -108,7 +137,7 @@ async function serveVideo(request, response) {
     'content-type': 'video/webm',
     'content-length': content.length,
     'cache-control': 'no-store',
-    'access-control-allow-origin': 'http://localhost:5173',
+    'access-control-allow-origin': corsOrigin,
   })
   response.end(content)
   return true
@@ -140,7 +169,7 @@ async function servePersistedArtifact(request, response) {
     'content-type': artifact.content_type,
     'content-length': content.length,
     'cache-control': 'no-store',
-    'access-control-allow-origin': 'http://localhost:5173',
+    'access-control-allow-origin': corsOrigin,
   })
   response.end(content)
   return true
@@ -380,18 +409,30 @@ async function validateLogin({ username, password, caseId, updateRows, persist =
 }
 
 const server = createServer(async (request, response) => {
-  if (request.method === 'OPTIONS') return json(response, 204, {})
-  if (request.method === 'GET' && request.url === '/api/artifacts') {
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, {
+      'access-control-allow-origin': corsOrigin,
+      'access-control-allow-headers': 'content-type',
+      'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+    })
+    return response.end()
+  }
+
+  const parsedUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`)
+  const pathname = parsedUrl.pathname
+  const searchParams = parsedUrl.searchParams
+
+  if (request.method === 'GET' && pathname === '/api/artifacts') {
     return json(response, 200, await listArtifacts())
   }
-  if (request.method === 'GET' && request.url === '/api/runs') {
+  if (request.method === 'GET' && pathname === '/api/runs') {
     try {
       return json(response, 200, await listPersistedRuns())
     } catch (error) {
       return json(response, 503, { error: sanitizedError(error) })
     }
   }
-  if (request.method === 'GET' && request.url === '/api/config') {
+  if (request.method === 'GET' && pathname === '/api/config') {
     return json(response, 200, {
       auto_update_on_upload: autoUpdateOnUpload,
       read_only: readOnly,
@@ -400,13 +441,162 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'GET' && await servePersistedArtifact(request, response)) return
   if (request.method === 'GET' && await serveVideo(request, response)) return
-  if (request.method !== 'POST' || !['/api/automation/validate-login', '/api/v1/oracle/timesheet/read', '/api/v1/oracle/timesheet/read-batch', '/api/v1/oracle/timesheet/update'].includes(request.url)) {
+
+  /* -------------------------------------------------------------------------
+     Phase 1: Applications Endpoints
+     ------------------------------------------------------------------------- */
+  if (pathname === '/api/applications') {
+    if (request.method === 'GET') {
+      try {
+        const apps = await listApplications({
+          search: searchParams.get('search') || undefined,
+          environment: searchParams.get('environment') || undefined,
+          authMethod: searchParams.get('authMethod') || undefined,
+          status: searchParams.get('status') || undefined,
+          sortBy: searchParams.get('sortBy') || undefined,
+          sortOrder: searchParams.get('sortOrder') || undefined,
+        })
+        return json(response, 200, apps)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+    if (request.method === 'POST') {
+      try {
+        const body = await readJson(request)
+        const validated = validateApplicationPayload(body, false)
+        const app = await createApplication(validated)
+        return json(response, 201, app)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+  }
+
+  const appArchiveMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/archive$/)
+  if (appArchiveMatch && request.method === 'POST') {
+    try {
+      const archived = await archiveApplication(appArchiveMatch[1])
+      if (!archived) return json(response, 404, { error: 'Application not found.' })
+      return json(response, 200, archived)
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
+  const appItemMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)$/)
+  if (appItemMatch) {
+    const appId = appItemMatch[1]
+    if (request.method === 'GET') {
+      try {
+        const app = await getApplicationById(appId)
+        if (!app) return json(response, 404, { error: 'Application not found.' })
+        return json(response, 200, app)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+    if (request.method === 'PATCH') {
+      try {
+        const body = await readJson(request)
+        const validated = validateApplicationPayload(body, true)
+        const updated = await updateApplication(appId, validated)
+        if (!updated) return json(response, 404, { error: 'Application not found.' })
+        return json(response, 200, updated)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+  }
+
+  /* -------------------------------------------------------------------------
+     Phase 1: Task Definitions (Automations) Endpoints
+     ------------------------------------------------------------------------- */
+  if (pathname === '/api/automations') {
+    if (request.method === 'GET') {
+      try {
+        const definitions = await listAutomationDefinitions({
+          search: searchParams.get('search') || undefined,
+          applicationId: searchParams.get('applicationId') || undefined,
+          category: searchParams.get('category') || undefined,
+          status: searchParams.get('status') || undefined,
+          sortBy: searchParams.get('sortBy') || undefined,
+          sortOrder: searchParams.get('sortOrder') || undefined,
+        })
+        return json(response, 200, definitions)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+    if (request.method === 'POST') {
+      try {
+        const body = await readJson(request)
+        const validated = validateAutomationDefinitionPayload(body, false)
+        const definition = await createAutomationDefinition(validated)
+        return json(response, 201, definition)
+      } catch (error) {
+        return json(response, 400, { error: sanitizedError(error) })
+      }
+    }
+  }
+
+  const taskDupMatch = pathname.match(/^\/api\/automations\/([a-zA-Z0-9_-]+)\/duplicate$/)
+  if (taskDupMatch && request.method === 'POST') {
+    try {
+      const duplicated = await duplicateAutomationDefinition(taskDupMatch[1])
+      if (!duplicated) return json(response, 404, { error: 'Task definition not found.' })
+      return json(response, 201, duplicated)
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
+  const taskArchiveMatch = pathname.match(/^\/api\/automations\/([a-zA-Z0-9_-]+)\/archive$/)
+  if (taskArchiveMatch && request.method === 'POST') {
+    try {
+      const archived = await archiveAutomationDefinition(taskArchiveMatch[1])
+      if (!archived) return json(response, 404, { error: 'Task definition not found.' })
+      return json(response, 200, archived)
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
+  const taskItemMatch = pathname.match(/^\/api\/automations\/([a-zA-Z0-9_-]+)$/)
+  if (taskItemMatch) {
+    const taskId = taskItemMatch[1]
+    if (request.method === 'GET') {
+      try {
+        const definition = await getAutomationDefinitionById(taskId)
+        if (!definition) return json(response, 404, { error: 'Task definition not found.' })
+        return json(response, 200, definition)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+    if (request.method === 'PATCH') {
+      try {
+        const body = await readJson(request)
+        const validated = validateAutomationDefinitionPayload(body, true)
+        const updated = await updateAutomationDefinition(taskId, validated)
+        if (!updated) return json(response, 404, { error: 'Task definition not found.' })
+        return json(response, 200, updated)
+      } catch (error) {
+        return phase1Error(response, error)
+      }
+    }
+  }
+
+  /* -------------------------------------------------------------------------
+     Oracle Timesheet Automation Endpoints
+     ------------------------------------------------------------------------- */
+  if (request.method !== 'POST' || !['/api/automation/validate-login', '/api/v1/oracle/timesheet/read', '/api/v1/oracle/timesheet/read-batch', '/api/v1/oracle/timesheet/update'].includes(pathname)) {
     return json(response, 404, { error: 'Not found.' })
   }
 
   try {
     const body = await readJson(request)
-    if (request.url === '/api/v1/oracle/timesheet/read-batch') {
+    if (pathname === '/api/v1/oracle/timesheet/read-batch') {
       const rows = parseCsvText(requiredString(body.csvText, 'csvText'))
       const runId = `upload-${Date.now()}-${randomUUID()}`
       await persistBatchResult({ runId, source: body.caseId, status: 'RUNNING', readOnly: true, rows: [], perRow: [] })
@@ -433,7 +623,7 @@ const server = createServer(async (request, response) => {
         per_row: perRow,
       })
     }
-    if (request.url === '/api/v1/oracle/timesheet/update') {
+    if (pathname === '/api/v1/oracle/timesheet/update') {
       const rows = parseCsvText(requiredString(body.csvText, 'csvText'))
       if (!writeEnabled || readOnly) {
         const perRow = rows.map((row) => ({
@@ -502,7 +692,7 @@ const server = createServer(async (request, response) => {
 
 initializeDatabase()
   .then(() => {
-    server.listen(port, () => {
+    server.listen(port, '127.0.0.1', () => {
       console.log(`Chronos automation service listening on http://localhost:${port}`)
       console.log(`Read-only mode: ${readOnly ? 'enabled' : 'disabled by configuration'}`)
       console.log('PostgreSQL persistence: enabled')
