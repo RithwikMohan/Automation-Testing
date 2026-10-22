@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { Activity, AlertTriangle, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, FileSpreadsheet, Film, Gauge, GitBranch, LayoutDashboard, Menu, Play, Plus, Search, Settings as SettingsIcon, ShieldCheck, Sparkles, Upload, Users, X, Zap } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, FileSpreadsheet, Film, Gauge, GitBranch, LayoutDashboard, Menu, Play, Plus, Search, Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingDown, TrendingUp, Upload, Users, X, Zap } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 
 type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings'
@@ -170,7 +170,7 @@ function App() {
     <main className="main">
       <header className="topbar"><button className="mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu /></button><div className="crumb"><span>Demo Environment</span><ChevronRight size={14} /><strong>{page === 'run-detail' ? 'Run details' : nav.find(n => n.id === page)?.label}</strong></div><div className="top-actions"><div className="top-search"><Search size={16} /><input placeholder="Search anything..." /></div><button className="icon-button"><Bell size={18} /><span className="notification-dot" /></button><div className="top-user"><div className="user-avatar">RM</div><div><strong>Rithwik</strong><small>Administrator</small></div><ChevronDown size={14} /></div></div></header>
       <div className="content">
-        <AnimatePresence mode="wait">{page === 'overview' && <Overview navigate={navigate} runs={runs} />}{page === 'upload' && <UploadPage rows={rows} fileName={fileName} fileRef={fileRef} selectFile={selectFile} setRows={setRows} setFileName={setFileName} validRows={validRows.length} processUpload={processUpload} isProcessing={isProcessing} validateReadOnly={validateReadOnly} isReadOnlyValidating={isReadOnlyValidating} autoUpdateOnUpload={autoUpdateOnUpload} />}{page === 'runs' && <RunsPage runs={filteredRuns} search={search} setSearch={setSearch} openRun={(run) => { setSelectedRun(run); navigate('run-detail') }} />}{page === 'run-detail' && selectedRun && <RunDetails run={selectedRun} back={() => navigate('runs')} />}{page === 'recordings' && <Recordings open={(recording) => { setSelectedRecording(recording); setRecordingOpen(true) }} />}{page === 'reports' && <Reports />}{page === 'settings' && <SettingsPage />}</AnimatePresence>
+        <AnimatePresence mode="wait">{page === 'overview' && <Overview navigate={navigate} runs={runs} />}{page === 'upload' && <UploadPage rows={rows} fileName={fileName} fileRef={fileRef} selectFile={selectFile} setRows={setRows} setFileName={setFileName} validRows={validRows.length} processUpload={processUpload} isProcessing={isProcessing} validateReadOnly={validateReadOnly} isReadOnlyValidating={isReadOnlyValidating} autoUpdateOnUpload={autoUpdateOnUpload} />}{page === 'runs' && <RunsPage runs={filteredRuns} search={search} setSearch={setSearch} openRun={(run) => { setSelectedRun(run); navigate('run-detail') }} />}{page === 'run-detail' && selectedRun && <RunDetails run={selectedRun} back={() => navigate('runs')} />}{page === 'recordings' && <Recordings open={(recording) => { setSelectedRecording(recording); setRecordingOpen(true) }} />}{page === 'reports' && <Reports navigate={navigate} />}{page === 'settings' && <SettingsPage />}</AnimatePresence>
       </div>
     </main>
     <AnimatePresence>{recordingOpen && <VideoModal recording={selectedRecording} close={() => { setRecordingOpen(false); setSelectedRecording(undefined) }} />}</AnimatePresence>
@@ -188,10 +188,184 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
     }
   }, { total: 0, passed: 0, failed: 0, partial: 0 })
   const pending = Math.max(0, totals.total - totals.passed - totals.failed - totals.partial)
+
+  const completed = totals.passed + totals.failed
+  const passRate = completed > 0 ? (totals.passed / completed) * 100 : 0
+
+  const runDates = runs.map((r) => new Date(r.created).getTime())
+  const latestDate = runDates.length > 0 ? new Date(Math.max(...runDates)) : null
+  const sevenDaysAgo = latestDate ? new Date(latestDate.getTime() - 7 * 24 * 60 * 60 * 1000) : null
+  const fourteenDaysAgo = latestDate ? new Date(latestDate.getTime() - 14 * 24 * 60 * 60 * 1000) : null
+
+  const currentPeriodRuns = (latestDate && sevenDaysAgo) ? runs.filter((r) => new Date(r.created) >= sevenDaysAgo) : []
+  const previousPeriodRuns = (latestDate && sevenDaysAgo && fourteenDaysAgo) ? runs.filter((r) => new Date(r.created) >= fourteenDaysAgo && new Date(r.created) < sevenDaysAgo) : []
+
+  const currentCompleted = currentPeriodRuns.reduce((s, r) => s + r.passed + r.failed, 0)
+  const currentPassed = currentPeriodRuns.reduce((s, r) => s + r.passed, 0)
+  const currentRate = currentCompleted > 0 ? (currentPassed / currentCompleted) * 100 : 0
+
+  const prevCompleted = previousPeriodRuns.reduce((s, r) => s + r.passed + r.failed, 0)
+  const prevPassed = previousPeriodRuns.reduce((s, r) => s + r.passed, 0)
+  const prevRate = prevCompleted > 0 ? (prevPassed / prevCompleted) * 100 : 0
+
+  const trendChange = prevCompleted > 0 ? currentRate - prevRate : null
+
+  const sparklineDays: Date[] = []
+  if (latestDate) {
+    for (let i = 6; i >= 0; i -= 1) {
+      const d = new Date(latestDate)
+      d.setDate(d.getDate() - i)
+      d.setHours(0, 0, 0, 0)
+      sparklineDays.push(d)
+    }
+  }
+
+  const sparklineData = sparklineDays.map((d) => {
+    const dayEnd = new Date(d.getTime() + 24 * 60 * 60 * 1000)
+    const dayRuns = runs.filter((r) => {
+      const rd = new Date(r.created)
+      return rd >= d && rd < dayEnd
+    })
+    const passed = dayRuns.reduce((s, r) => s + r.passed, 0)
+    const failed = dayRuns.reduce((s, r) => s + r.failed, 0)
+    const dayCompleted = passed + failed
+    return {
+      date: d.toISOString().slice(0, 10),
+      day: d.toLocaleDateString(undefined, { weekday: 'short' }),
+      passed,
+      failed,
+      rate: dayCompleted > 0 ? (passed / dayCompleted) * 100 : 0
+    }
+  })
   return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
   <div className="hero"><div><div className="demo-label"><span className="pulse-dot" /> LIVE AUTOMATION DATA</div><h1>Good morning, Rithwik <span className="wave">✦</span></h1><p>Your timesheet automation command center.</p></div><div className="hero-actions"><button className="button button-secondary" onClick={() => navigate('runs')}>View test runs <ArrowUpRight size={16} /></button><button className="button button-primary" onClick={() => navigate('upload')}><Plus size={17} /> Upload test cases</button></div></div>
   <div className="metric-grid"><Metric icon={FileSpreadsheet} label="Total test cases" value={String(totals.total)} trend="Persisted results" color="violet" /><Metric icon={CheckCircle2} label="Passed" value={String(totals.passed)} trend={totals.total ? `${Math.round(totals.passed / totals.total * 100)}% pass rate` : 'No results yet'} color="cyan" /><Metric icon={AlertTriangle} label="Partial" value={String(totals.partial)} trend="Mixed-result runs" color="amber" /><Metric icon={AlertTriangle} label="Failed" value={String(totals.failed)} trend="Persisted failures" color="orange" /><Metric icon={Clock3} label="Pending" value={String(pending)} trend={pending ? 'Awaiting result' : 'No pending cases'} color="blue" /></div>
-  <div className="grid-2"><section className="card chart-card"><div className="card-heading"><div><h2>Execution overview</h2><p>Passed / Partial / Failed cases across runs</p></div></div><div className="chart-wrap"><ResponsiveContainer width="100%" height={300}><BarChart data={runs.map(r => ({ name: r.id.slice(-8), passed: r.passed, partial: r.status === 'Partial' ? r.failed : 0, failed: r.status === 'Partial' ? 0 : r.failed }))}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} /><Tooltip /><Bar dataKey="passed" fill="#22c55e" radius={[4, 4, 0, 0]} stackId="a" /><Bar dataKey="partial" fill="#f59e0b" radius={[4, 4, 0, 0]} stackId="a" /><Bar dataKey="failed" fill="#ef4444" radius={[4, 4, 0, 0]} stackId="a" /></BarChart></ResponsiveContainer></div></section><section className="card activity-card"><div className="card-heading"><div><h2>Latest activity</h2><p>Persisted automation runs</p></div></div>{runs.length ? <div className="activity-list">{runs.slice(0, 4).map(run => <ActivityItem key={run.id} icon={run.status === 'Failed' ? AlertTriangle : CheckCircle2} color={run.status === 'Failed' ? 'orange' : run.status === 'Partial' ? 'amber' : 'cyan'} title={`${run.status} run`} detail={`${run.file} · ${run.total} cases`} time={new Date(run.created).toLocaleString()} />)}</div> : <div className="empty-recordings"><Activity size={28} /><strong>No activity yet</strong><span>Processed runs will appear here.</span></div>}</section></div>
+  <div className="grid-2">
+  <section className="card reliability-card">
+    <div className="card-heading">
+      <div>
+        <h2>Automation Reliability</h2>
+        <p>Timesheet automation pass rate across all executed test cases.</p>
+      </div>
+    </div>
+    <div className="reliability-content">
+      {completed === 0 ? (
+        <div className="reliability-empty">
+          <Activity size={28} />
+          <strong>No completed executions</strong>
+          <p>Run test cases to see your automation success rate here.</p>
+        </div>
+      ) : (
+        <>
+          <div className="reliability-top">
+            <div className="reliability-circle">
+              <svg className="reliability-svg" width="200" height="200" viewBox="0 0 200 200">
+                <defs>
+                  <linearGradient id="reliability-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#10b981" />
+                    <stop offset="100%" stopColor="#21d4d8" />
+                  </linearGradient>
+                </defs>
+                <circle className="reliability-track" cx="100" cy="100" r="85" />
+                <circle
+                  className="reliability-progress"
+                  cx="100"
+                  cy="100"
+                  r="85"
+                  style={{
+                    strokeDasharray: `${completed > 0 ? (passRate / 100) * 534 : 0} 534`,
+                  }}
+                />
+              </svg>
+              <div className="reliability-value">
+                <span className="reliability-percent">{passRate.toFixed(1)}%</span>
+                <span className="reliability-label">Automation success rate</span>
+              </div>
+            </div>
+            <div className="reliability-summary">
+              <div className="summary-stat">
+                <div className="summary-value passed">{totals.passed}</div>
+                <div className="summary-label">Passed</div>
+              </div>
+              <div className="summary-stat">
+                <div className="summary-value failed">{totals.failed}</div>
+                <div className="summary-label">Failed</div>
+              </div>
+              <div className="summary-stat">
+                <div className="summary-value completed">{completed}</div>
+                <div className="summary-label">Completed</div>
+              </div>
+              {totals.partial > 0 && (
+                <div className="summary-stat partial">
+                  <div className="summary-value partial">{totals.partial}</div>
+                  <div className="summary-label">Partial</div>
+                </div>
+              )}
+              {pending > 0 && (
+                <div className="summary-stat">
+                  <div className="summary-value">{pending}</div>
+                  <div className="summary-label">Pending</div>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="reliability-trend">
+            <div className="trend-header">
+              <div className="trend-title">
+                <Clock3 size={13} />
+                <span>7-Day Reliability Trend</span>
+              </div>
+              {trendChange !== null ? (
+                <div className="trend-indicator">
+                  <div className={`trend-value ${trendChange >= 0 ? 'trend-up' : 'trend-down'}`}>
+                    {trendChange >= 0 ? '+' : ''}{trendChange.toFixed(1)} pts
+                    {trendChange >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
+                  </div>
+                  <span className="trend-label">vs previous period</span>
+                </div>
+              ) : (
+                <div className="trend-indicator trend-empty">
+                  <span className="trend-label">Not enough historical data</span>
+                </div>
+              )}
+            </div>
+            <div className="sparkline-wrap">
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={sparklineData} margin={{ top: 10, right: 12, left: -22, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="sparkline-gradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1b243b" />
+                  <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#707c97' }} axisLine={{ stroke: '#1b243b' }} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#707c97' }} axisLine={{ stroke: '#1b243b' }} tickLine={false} unit="%" />
+                  <Tooltip
+                    content={({ active, payload }: { active?: boolean; payload?: any[] }) => {
+                      if (active && payload && payload[0]) {
+                        const d = payload[0].payload
+                        return (
+                          <div className="recharts-tooltip">
+                            <div style={{ fontWeight: 600, color: '#e8ebf5' }}>{d.day} ({d.date})</div>
+                            <div style={{ color: '#10b981', fontSize: 11 }}>Passed: {d.passed}</div>
+                            <div style={{ color: '#ef4444', fontSize: 11 }}>Failed: {d.failed}</div>
+                            <div style={{ color: '#21d4d8', fontSize: 11, fontWeight: 600 }}>Rate: {d.rate.toFixed(1)}%</div>
+                          </div>
+                        )
+                      }
+                      return null
+                    }}
+                  />
+                  <Area type="monotone" dataKey="rate" fill="url(#sparkline-gradient)" stroke="#10b981" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  </section><section className="card activity-card"><div className="card-heading"><div><h2>Latest activity</h2><p>Persisted automation runs</p></div></div>{runs.length ? <div className="activity-list">{runs.slice(0, 4).map(run => <ActivityItem key={run.id} icon={run.status === 'Failed' ? AlertTriangle : CheckCircle2} color={run.status === 'Failed' ? 'orange' : run.status === 'Partial' ? 'amber' : 'cyan'} title={`${run.status} run`} detail={`${run.file} · ${run.total} cases`} time={new Date(run.created).toLocaleString()} />)}</div> : <div className="empty-recordings"><Activity size={28} /><strong>No activity yet</strong><span>Processed runs will appear here.</span></div>}</section></div>
   <section className="card runs-card"><div className="card-heading"><div><h2>Recent test runs</h2><p>Monitor your latest simulated executions</p></div><button className="text-button" onClick={() => navigate('runs')}>View all runs <ArrowUpRight size={14} /></button></div><RunsTable runs={runs.slice(0, 3)} openRun={(r) => navigate('run-detail')} /></section>
 </motion.div> }
 function ActivityItem({ icon: Icon, color, title, detail, time }: { icon: typeof Activity; color: string; title: string; detail: string; time: string }) { return <div className="activity-item"><div className={`activity-icon ${color}`}><Icon size={15} /></div><div><strong>{title}</strong><span>{detail}</span></div><time>{time}</time></div> }
@@ -278,7 +452,7 @@ function Recordings({ open }: { open: (recording?: Artifact) => void }) {
 }
 type Artifact = { artifactId: string; caseId: string; status: string; readOnly: boolean; recordingAvailable: boolean; videoUrl: string | null }
 function VideoModal({ close, recording }: { close: () => void; recording?: Artifact }) { return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="modal-backdrop" onClick={close}><motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="video-modal card" onClick={e => e.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">{recording?.readOnly ? 'READ-ONLY RECORDING' : 'DEMO RECORDING'} · {recording?.caseId || '—'}</div><h2>Recording preview</h2></div><button className="icon-button" onClick={close}><X size={18} /></button></div>{recording?.videoUrl ? <video className="real-video" controls autoPlay src={`http://localhost:8787${recording.videoUrl}`} /> : <div className="video-placeholder"><Film size={42} /><strong>Recording will be available when the Playwright worker is connected.</strong><span>No browser session or real Oracle account was accessed.</span></div>}<div className="timeline"><div><span className="timeline-dot cyan" /><b>Login validation</b><small>Read-only</small></div><div><span className="timeline-dot violet" /><b>Authentication result</b><small>{recording?.status || 'Unavailable'}</small></div><div><span className="timeline-dot orange" /><b>Timesheet changes</b><small>None</small></div></div></motion.div></motion.div> }
-function Reports() {
+function Reports({ navigate }: { navigate: (p: Page) => void }) {
   const [runs, setRuns] = useState<Run[]>([])
   useEffect(() => {
     fetch('http://localhost:8787/api/runs')

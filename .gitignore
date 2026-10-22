@@ -10,3 +10,4 @@ chronos_timesheet_test_cases.xlsx
 *.xlsx
 *.webm
 *.png
+.vscode/
