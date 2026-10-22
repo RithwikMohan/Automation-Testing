@@ -101,6 +101,25 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_automation_definitions_app_id ON automation_definitions(application_id);
     CREATE INDEX IF NOT EXISTS idx_automation_definitions_status ON automation_definitions(status);
     CREATE INDEX IF NOT EXISTS idx_automation_definitions_updated_at ON automation_definitions(updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS exploration_results (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+      target_url TEXT NOT NULL,
+      status TEXT NOT NULL,
+      title TEXT,
+      meta_description TEXT,
+      headings JSONB NOT NULL DEFAULT '[]'::jsonb,
+      links JSONB NOT NULL DEFAULT '[]'::jsonb,
+      forms JSONB NOT NULL DEFAULT '[]'::jsonb,
+      interactive_elements JSONB NOT NULL DEFAULT '{}'::jsonb,
+      auth_detected BOOLEAN NOT NULL DEFAULT false,
+      warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+      duration_ms INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_exploration_results_app_id ON exploration_results(application_id);
+    CREATE INDEX IF NOT EXISTS idx_exploration_results_created_at ON exploration_results(created_at DESC);
   `)
 }
 
@@ -673,3 +692,61 @@ export async function archiveAutomationDefinition(id) {
   )
   return result.rows[0] || null
 }
+
+export async function persistExplorationResult(result) {
+  const database = getDatabasePool()
+  const res = await database.query(
+    `INSERT INTO exploration_results
+     (id, application_id, target_url, status, title, meta_description, headings, links, forms, interactive_elements, auth_detected, warnings, duration_ms, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     ON CONFLICT (id) DO UPDATE SET
+       status = EXCLUDED.status,
+       title = EXCLUDED.title,
+       meta_description = EXCLUDED.meta_description,
+       headings = EXCLUDED.headings,
+       links = EXCLUDED.links,
+       forms = EXCLUDED.forms,
+       interactive_elements = EXCLUDED.interactive_elements,
+       auth_detected = EXCLUDED.auth_detected,
+       warnings = EXCLUDED.warnings,
+       duration_ms = EXCLUDED.duration_ms
+     RETURNING *`,
+    [
+      result.id,
+      result.applicationId,
+      result.targetUrl,
+      result.status,
+      result.title || null,
+      result.metaDescription || null,
+      JSON.stringify(result.headings || []),
+      JSON.stringify(result.links || []),
+      JSON.stringify(result.forms || []),
+      JSON.stringify(result.interactiveElements || {}),
+      Boolean(result.authDetected),
+      JSON.stringify(result.warnings || []),
+      result.durationMs || null,
+      result.createdAt || new Date(),
+    ],
+  )
+  return res.rows[0]
+}
+
+export async function listExplorationResults(applicationId) {
+  const database = getDatabasePool()
+  let query = 'SELECT * FROM exploration_results'
+  const params = []
+  if (applicationId) {
+    query += ' WHERE application_id = $1'
+    params.push(applicationId)
+  }
+  query += ' ORDER BY created_at DESC LIMIT 50'
+  const res = await database.query(query, params)
+  return res.rows
+}
+
+export async function getExplorationResultById(id) {
+  const database = getDatabasePool()
+  const res = await database.query('SELECT * FROM exploration_results WHERE id = $1', [id])
+  return res.rows[0] || null
+}
+

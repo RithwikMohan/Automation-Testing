@@ -26,7 +26,11 @@ import {
   persistResult,
   updateApplication,
   updateAutomationDefinition,
+  listExplorationResults,
+  getExplorationResultById,
 } from './database.mjs'
+import { runExploration } from './exploration/explorationRunner.mjs'
+import { generateTaskPlan, PlanningError } from './planning/taskPlanning.mjs'
 import {
   validateApplicationPayload,
   validateAutomationDefinitionPayload,
@@ -506,6 +510,70 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         return phase1Error(response, error)
       }
+    }
+  }
+
+  /* -------------------------------------------------------------------------
+     Phase 2.2: Natural-Language Task Planning (review only)
+     ------------------------------------------------------------------------- */
+  const planMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/plan$/)
+  if (planMatch && request.method === 'POST') {
+    try {
+      let body
+      try {
+        body = await readJson(request)
+      } catch {
+        return json(response, 400, { error: 'Request body must be valid JSON and within the allowed size.' })
+      }
+      const plan = await generateTaskPlan({
+        applicationId: planMatch[1],
+        instruction: body?.instruction,
+      })
+      return json(response, 200, plan)
+    } catch (error) {
+      const status = error instanceof PlanningError ? error.status : 500
+      const message = error instanceof PlanningError ? error.message : 'Task planning failed. Please retry.'
+      return json(response, status, { error: message })
+    }
+  }
+
+  /* -------------------------------------------------------------------------
+     Phase 2.1: Generic Browser Exploration Endpoints
+     ------------------------------------------------------------------------- */
+  const exploreMatch = pathname.match(/^(?:\/api\/v1)?\/applications\/([a-zA-Z0-9_-]+)\/explore$/)
+  if (exploreMatch && request.method === 'POST') {
+    try {
+      const body = await readJson(request).catch(() => ({}))
+      const result = await runExploration({
+        applicationId: exploreMatch[1],
+        targetUrl: body.targetUrl,
+        timeoutMs: body.timeoutMs,
+      })
+      const isOk = result.status === 'SUCCESS' || result.status === 'AUTH_REQUIRED'
+      return json(response, isOk ? 200 : 422, result)
+    } catch (error) {
+      return json(response, 400, { error: sanitizedError(error) })
+    }
+  }
+
+  const appExplorationsMatch = pathname.match(/^(?:\/api\/v1)?\/applications\/([a-zA-Z0-9_-]+)\/explorations$/)
+  if (appExplorationsMatch && request.method === 'GET') {
+    try {
+      const results = await listExplorationResults(appExplorationsMatch[1])
+      return json(response, 200, results)
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
+  const singleExplorationMatch = pathname.match(/^(?:\/api\/v1)?\/explorations\/([a-zA-Z0-9_-]+)$/)
+  if (singleExplorationMatch && request.method === 'GET') {
+    try {
+      const result = await getExplorationResultById(singleExplorationMatch[1])
+      if (!result) return json(response, 404, { error: 'Exploration result not found.' })
+      return json(response, 200, result)
+    } catch (error) {
+      return phase1Error(response, error)
     }
   }
 

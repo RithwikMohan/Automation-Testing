@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import Papa from 'papaparse'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { Activity, AlertTriangle, Archive, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, Copy, Edit3, ExternalLink, FileSpreadsheet, Film, GitBranch, Globe, Info, LayoutDashboard, List, Loader2, Menu, Play, Plus, Search, Settings as SettingsIcon, ShieldCheck, Sparkles, Tag, TrendingDown, TrendingUp, Upload, X, Zap } from 'lucide-react'
+import { Activity, AlertTriangle, Archive, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, Compass, Copy, Edit3, ExternalLink, FileSpreadsheet, Film, GitBranch, Globe, Info, KeyRound, LayoutDashboard, List, Loader2, Menu, Play, Plus, Search, Settings as SettingsIcon, ShieldCheck, Sparkles, Tag, TrendingDown, TrendingUp, Upload, X, Zap } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { getRegisteredBaseUrl, MISSING_BASE_URL_MESSAGE } from './explorationTarget'
 
-type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings' | 'applications' | 'create-automation' | 'automations'
+type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings' | 'applications' | 'create-automation' | 'automations' | 'task-planner'
 type Status = 'Passed' | 'Failed' | 'Running' | 'Pending' | 'Partial'
 type Validation = 'READY' | 'INVALID' | 'PROJECT MISMATCH' | 'EXCEEDS LIMIT' | 'NEEDS DATA' | 'UPDATED' | 'UPDATE FAILED' | 'UPDATE IN PROGRESS' | 'VERIFICATION FAILED'
 type Row = { id: string; username: string; date: string; hours: number; workdescription: string; existing: number | null; validation: Validation; error?: string }
@@ -44,6 +45,25 @@ type AutomationDefinition = {
   updated_at: string
   application_name?: string
 }
+type PlannedAction = { action: 'navigate_registered_app' | 'inspect_page' | 'find_visible_element' | 'extract_text' | 'verify_element'; description?: string }
+type TaskPlan = { applicationId: string; applicationName: string; registeredBaseUrl: string; purpose: string; actions: PlannedAction[]; status: 'REVIEW_REQUIRED' }
+
+type ExplorationResult = {
+  id: string
+  application_id: string
+  target_url: string
+  status: 'SUCCESS' | 'AUTH_REQUIRED' | 'SECURITY_BLOCKED' | 'TIMEOUT' | 'FAILED'
+  title: string | null
+  meta_description: string | null
+  headings: Array<{ level: number; text: string }>
+  links: Array<{ text: string; href: string; isSameOrigin: boolean }>
+  forms: Array<{ action: string | null; method: string; fieldCount: number; fields: Array<{ name: string; type: string; placeholder?: string }>; hasPasswordField: boolean }>
+  interactive_elements: { buttonCount: number; linkCount: number; inputCount: number; selectCount: number }
+  auth_detected: boolean
+  warnings: string[]
+  duration_ms: number | null
+  created_at: string
+}
 
 const ENVIRONMENTS = ['Development', 'Testing', 'Staging', 'Production']
 const AUTH_METHODS = ['none', 'manual', 'credential_reference', 'other']
@@ -57,6 +77,7 @@ const nav = [
   { id: 'applications', label: 'Applications', icon: Globe },
   { id: 'create-automation', label: 'Create Automation', icon: Sparkles },
   { id: 'automations', label: 'Task Definitions', icon: List },
+  { id: 'task-planner', label: 'Task Planner', icon: Sparkles },
   { id: 'upload', label: 'Upload Test Cases', icon: CloudUpload },
   { id: 'runs', label: 'Test Runs', icon: GitBranch },
   { id: 'recordings', label: 'Recordings', icon: Film },
@@ -214,6 +235,7 @@ function App() {
           {page === 'applications' && <ApplicationsPage navigate={navigate} />}
           {page === 'create-automation' && <CreateAutomationPage navigate={navigate} definition={editingDefinition} />}
           {page === 'automations' && <AutomationsPage navigate={navigate} onEdit={definition => { setEditingDefinition(definition); navigate('create-automation') }} />}
+          {page === 'task-planner' && <TaskPlannerPage />}
           {page === 'upload' && <UploadPage rows={rows} fileName={fileName} fileRef={fileRef} selectFile={selectFile} setRows={setRows} setFileName={setFileName} validRows={validRows.length} processUpload={processUpload} isProcessing={isProcessing} validateReadOnly={validateReadOnly} isReadOnlyValidating={isReadOnlyValidating} autoUpdateOnUpload={autoUpdateOnUpload} />}
           {page === 'runs' && <RunsPage runs={filteredRuns} search={search} setSearch={setSearch} openRun={(run) => { setSelectedRun(run); navigate('run-detail') }} />}
           {page === 'run-detail' && selectedRun && <RunDetails run={selectedRun} back={() => navigate('runs')} />}
@@ -240,6 +262,238 @@ function envColor(e: string) {
   return map[e] || 'blue'
 }
 
+function ExplorationModal({ app, onClose }: { app: Application | null; onClose: () => void }) {
+  const registeredBaseUrl = app ? getRegisteredBaseUrl(app) : ''
+  const [targetUrl, setTargetUrl] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<ExplorationResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [history, setHistory] = useState<ExplorationResult[]>([])
+  const [loadingHistory, setLoadingHistory] = useState(false)
+
+  useEffect(() => {
+    if (app) {
+      setTargetUrl(registeredBaseUrl)
+      setResult(null)
+      setError(null)
+      setLoadingHistory(true)
+      fetch(`${API}/api/v1/applications/${app.id}/explorations`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then(setHistory)
+        .catch(() => {})
+        .finally(() => setLoadingHistory(false))
+    }
+  }, [app, registeredBaseUrl])
+
+  if (!app) return null
+
+  const run = async () => {
+    if (!registeredBaseUrl) {
+      setError(MISSING_BASE_URL_MESSAGE)
+      return
+    }
+    setRunning(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await fetch(`${API}/api/v1/applications/${app.id}/explore`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ targetUrl: targetUrl.trim() || registeredBaseUrl }),
+      })
+      const data = await res.json()
+      if (!res.ok && !data.status) {
+        throw new Error(data.error || 'Exploration failed.')
+      }
+      setResult(data)
+      fetch(`${API}/api/v1/applications/${app.id}/explorations`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then(setHistory)
+        .catch(() => {})
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Exploration failed.')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const badgeClass = (st: string) => {
+    if (st === 'SUCCESS') return 'exploration-badge-success'
+    if (st === 'AUTH_REQUIRED') return 'exploration-badge-auth'
+    if (st === 'SECURITY_BLOCKED') return 'exploration-badge-blocked'
+    return 'exploration-badge-timeout'
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 24, opacity: 0 }} className="modal-panel modal-panel-wide card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-heading">
+          <div>
+            <div className="eyebrow">PHASE 2.1 BROWSER EXPLORATION</div>
+            <h2>Inspect {app.name}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <div className="info-banner exploration-active" style={{ marginBottom: 14 }}>
+          <ShieldCheck size={16} />
+          <span><strong>Strictly Read-Only Inspection.</strong> Navigates through an enforced outbound proxy. Blocks loopback, private networks, cloud metadata, non-standard ports, and redirects. Never submits forms or modifies data.</span>
+        </div>
+
+        <div className="form-group" style={{ marginBottom: 14 }}>
+          <label>Target Exploration URL (Within registered scope)</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              style={{ flex: 1 }}
+              value={targetUrl}
+              onChange={(e) => setTargetUrl(e.target.value)}
+              placeholder={registeredBaseUrl || 'Add a Base URL to this application first'}
+              disabled={running || !registeredBaseUrl}
+            />
+            <button
+              className="button button-primary"
+              onClick={run}
+              disabled={running || !registeredBaseUrl}
+              style={{ minWidth: 160 }}
+            >
+              {running ? <><Loader2 size={15} className="spin" /> Inspecting…</> : <><Compass size={15} /> Inspect Website</>}
+            </button>
+          </div>
+          {!registeredBaseUrl && <span className="field-error">{MISSING_BASE_URL_MESSAGE}</span>}
+        </div>
+
+        {error && (
+          <div className="info-banner info-banner-error" style={{ marginBottom: 14 }}>
+            <AlertTriangle size={16} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {/* Live Exploration Result */}
+        {result && (
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} style={{ marginTop: 16 }}>
+            <div className="exploration-meta-bar">
+              <div>Status: <span className={`badge ${badgeClass(result.status)}`}>{result.status}</span></div>
+              {result.duration_ms !== null && <div>Duration: <strong>{result.duration_ms}ms</strong></div>}
+              {result.title && <div>Page Title: <strong>{result.title}</strong></div>}
+              {result.auth_detected && (
+                <div style={{ color: '#fbbf24', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <KeyRound size={14} /> <strong>Auth Required / Login Detected</strong>
+                </div>
+              )}
+            </div>
+
+            {/* Warnings if any */}
+            {result.warnings && result.warnings.length > 0 && (
+              <div className="exploration-warning-box">
+                <strong>Security & Network Audit:</strong>
+                <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+                  {result.warnings.map((w, idx) => <li key={idx}>{w}</li>)}
+                </ul>
+              </div>
+            )}
+
+            {/* Metrics */}
+            <div className="exploration-stat-grid">
+              <div className="exploration-stat-card">
+                <div className="exploration-stat-label">Buttons</div>
+                <div className="exploration-stat-value">{result.interactive_elements?.buttonCount || 0}</div>
+              </div>
+              <div className="exploration-stat-card">
+                <div className="exploration-stat-label">Links Found</div>
+                <div className="exploration-stat-value">{result.interactive_elements?.linkCount || result.links?.length || 0}</div>
+              </div>
+              <div className="exploration-stat-card">
+                <div className="exploration-stat-label">Form Inputs</div>
+                <div className="exploration-stat-value">{result.interactive_elements?.inputCount || 0}</div>
+              </div>
+              <div className="exploration-stat-card">
+                <div className="exploration-stat-label">Forms</div>
+                <div className="exploration-stat-value">{result.forms?.length || 0}</div>
+              </div>
+            </div>
+
+            {/* Headings */}
+            {result.headings && result.headings.length > 0 && (
+              <div className="exploration-details-group">
+                <div className="exploration-details-title"><List size={14} /> Page Headings ({result.headings.length})</div>
+                <div className="exploration-item-list">
+                  {result.headings.map((h, i) => (
+                    <div key={i} className="exploration-item-row">
+                      <span>{h.text}</span>
+                      <span className="tag-badge">H{h.level}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Forms detected */}
+            {result.forms && result.forms.length > 0 && (
+              <div className="exploration-details-group">
+                <div className="exploration-details-title"><FileSpreadsheet size={14} /> Forms Detected ({result.forms.length})</div>
+                <div className="exploration-item-list">
+                  {result.forms.map((f, i) => (
+                    <div key={i} className="exploration-item-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <span className="tag-badge">{f.method}</span>
+                        <span>Action: <code>{f.action || '(self)'}</code></span>
+                        {f.hasPasswordField && <span className="tag-badge" style={{ color: '#fbbf24', borderColor: '#d97706' }}>Password Input</span>}
+                      </div>
+                      {f.fields && f.fields.length > 0 && (
+                        <div style={{ fontSize: 11, color: '#64748b' }}>
+                          Fields: {f.fields.map((fld) => `${fld.name} (${fld.type})`).join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Discovered Links */}
+            {result.links && result.links.length > 0 && (
+              <div className="exploration-details-group">
+                <div className="exploration-details-title"><Globe size={14} /> Discovered Links ({result.links.length})</div>
+                <div className="exploration-item-list">
+                  {result.links.slice(0, 15).map((l, i) => (
+                    <div key={i} className="exploration-item-row">
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '75%' }}>{l.text}</span>
+                      <span className="tag-badge">{l.isSameOrigin ? 'Same Origin' : 'External'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {/* Previous Explorations History */}
+        <div className="exploration-history-section">
+          <div className="exploration-details-title"><Clock3 size={14} /> Prior Exploration History</div>
+          {loadingHistory && <div style={{ fontSize: 12, color: '#64748b' }}>Loading history…</div>}
+          {!loadingHistory && history.length === 0 && (
+            <div style={{ fontSize: 12, color: '#64748b' }}>No prior explorations recorded for this application.</div>
+          )}
+          {!loadingHistory && history.length > 0 && (
+            <div className="exploration-item-list" style={{ maxHeight: 150 }}>
+              {history.map((item) => (
+                <div key={item.id} className="exploration-item-row" style={{ cursor: 'pointer' }} onClick={() => setResult(item)}>
+                  <div>
+                    <strong>{item.title || item.target_url}</strong>
+                    <div style={{ fontSize: 10, color: '#64748b' }}>{new Date(item.created_at).toLocaleString()} · {item.target_url}</div>
+                  </div>
+                  <span className={`badge ${badgeClass(item.status)}`}>{item.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
 function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
   const [apps, setApps] = useState<Application[]>([])
   const [loading, setLoading] = useState(true)
@@ -250,6 +504,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
   const [showModal, setShowModal] = useState(false)
   const [editApp, setEditApp] = useState<Application | null>(null)
   const [detailApp, setDetailApp] = useState<Application | null>(null)
+  const [exploreApp, setExploreApp] = useState<Application | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000) }
@@ -289,9 +544,9 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
         action={<button className="button button-primary" onClick={() => { setEditApp(null); setShowModal(true) }}><Plus size={16} /> Add Application</button>}
       />
 
-      <div className="info-banner exploration-gate" role="status">
+      <div className="info-banner exploration-active" role="status">
         <ShieldCheck size={17} />
-        <span><strong>Read-only browser inspection is unavailable.</strong> A controlled outbound network boundary is required before Chronos can safely open registered websites. No generic browser navigation is enabled.</span>
+        <span><strong>Phase 2.1 Outbound Security Boundary Active.</strong> Bounded read-only inspection is enabled with destination domain enforcement, DNS pinning, and strict egress blocking for private networks, cloud metadata, and redirects.</span>
       </div>
 
       {/* Toolbar */}
@@ -336,11 +591,12 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
                   <span className={`env-badge env-${envColor(app.environment)}`}>{app.environment}</span>
                 </div>
                 <div className="app-card-actions">
+                  <button className="icon-button-sm" title="Inspect website (Read-only)" onClick={() => setExploreApp(app)}><Compass size={14} /></button>
                   <button className="icon-button-sm" title="Edit" onClick={() => { setEditApp(app); setShowModal(true) }}><Edit3 size={14} /></button>
                   <button className="icon-button-sm" title="Archive" onClick={() => archive(app.id, app.name)}><Archive size={14} /></button>
                 </div>
               </div>
-      <span className="app-url"><Globe size={11} />{app.base_url}</span>
+              <span className="app-url"><Globe size={11} />{app.base_url}</span>
               {app.description && <p className="app-desc">{app.description}</p>}
               <div className="app-meta">
                 {app.category && <span className="app-tag"><Tag size={11} />{app.category}</span>}
@@ -349,16 +605,47 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
               </div>
               <div className="app-footer">
                 <span className="app-date">Updated {new Date(app.updated_at).toLocaleDateString()}</span>
-                <button className="text-button" onClick={() => { navigate('create-automation') }}>+ New task</button>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button className="text-button" onClick={() => setExploreApp(app)}><Compass size={12} style={{ marginRight: 3 }} /> Inspect</button>
+                  <button className="text-button" onClick={() => { navigate('create-automation') }}>+ New task</button>
+                </div>
               </div>
             </motion.div>
           ))}
         </div>
       )}
 
-      {/* Toast */}
+      {/* Detail / Toast Modals */}
       <AnimatePresence>
-        {detailApp && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="modal-backdrop" onClick={() => setDetailApp(null)}><motion.div initial={{ y: 24 }} animate={{ y: 0 }} exit={{ y: 24 }} className="modal-panel card" onClick={e => e.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">REGISTERED APPLICATION</div><h2>{detailApp.name}</h2></div><button className="icon-button" onClick={() => setDetailApp(null)}><X size={18} /></button></div><p><strong>Base URL:</strong> {detailApp.base_url}</p><p><strong>Environment:</strong> {detailApp.environment} · <strong>Status:</strong> {detailApp.status}</p><p><strong>Authentication:</strong> {authMethodLabel(detailApp.auth_method)}</p>{detailApp.credential_ref && <p><strong>Credential reference:</strong> {detailApp.credential_ref}</p>}{detailApp.login_url && <p><strong>Login URL:</strong> {detailApp.login_url}</p>}{detailApp.category && <p><strong>Category:</strong> {detailApp.category}</p>}{detailApp.description && <p><strong>Description:</strong> {detailApp.description}</p>}{detailApp.notes && <p><strong>Notes:</strong> {detailApp.notes}</p>}<button className="button button-primary" onClick={() => { const selected = detailApp; setDetailApp(null); setEditApp(selected); setShowModal(true) }}>Edit application</button></motion.div></motion.div>}
+        {detailApp && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="modal-backdrop" onClick={() => setDetailApp(null)}>
+            <motion.div initial={{ y: 24 }} animate={{ y: 0 }} exit={{ y: 24 }} className="modal-panel card" onClick={e => e.stopPropagation()}>
+              <div className="modal-heading">
+                <div>
+                  <div className="eyebrow">REGISTERED APPLICATION</div>
+                  <h2>{detailApp.name}</h2>
+                </div>
+                <button className="icon-button" onClick={() => setDetailApp(null)}><X size={18} /></button>
+              </div>
+              <p><strong>Base URL:</strong> {detailApp.base_url}</p>
+              <p><strong>Environment:</strong> {detailApp.environment} · <strong>Status:</strong> {detailApp.status}</p>
+              <p><strong>Authentication:</strong> {authMethodLabel(detailApp.auth_method)}</p>
+              {detailApp.credential_ref && <p><strong>Credential reference:</strong> {detailApp.credential_ref}</p>}
+              {detailApp.login_url && <p><strong>Login URL:</strong> {detailApp.login_url}</p>}
+              {detailApp.category && <p><strong>Category:</strong> {detailApp.category}</p>}
+              {detailApp.description && <p><strong>Description:</strong> {detailApp.description}</p>}
+              {detailApp.notes && <p><strong>Notes:</strong> {detailApp.notes}</p>}
+              <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                <button className="button button-secondary" onClick={() => { const selected = detailApp; setDetailApp(null); setExploreApp(selected) }}>
+                  <Compass size={14} /> Inspect website
+                </button>
+                <button className="button button-primary" onClick={() => { const selected = detailApp; setDetailApp(null); setEditApp(selected); setShowModal(true) }}>
+                  Edit application
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
         {toast && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="toast">
             <CheckCircle2 size={16} /> {toast}
@@ -366,13 +653,23 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
         )}
       </AnimatePresence>
 
-      {/* Modal */}
+      {/* Edit Form Modal */}
       <AnimatePresence>
         {showModal && (
           <AppFormModal
             app={editApp}
             onClose={() => setShowModal(false)}
             onSaved={() => { setShowModal(false); load(); showToast(editApp ? 'Application updated.' : 'Application registered.') }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Phase 2.1 Exploration Modal */}
+      <AnimatePresence>
+        {exploreApp && (
+          <ExplorationModal
+            app={exploreApp}
+            onClose={() => setExploreApp(null)}
           />
         )}
       </AnimatePresence>
@@ -504,6 +801,128 @@ function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onCl
           </button>
         </div>
       </motion.div>
+    </motion.div>
+  )
+}
+
+function TaskPlannerPage() {
+  const [apps, setApps] = useState<Application[]>([])
+  const [appsLoading, setAppsLoading] = useState(true)
+  const [applicationId, setApplicationId] = useState('')
+  const [instruction, setInstruction] = useState('')
+  const [plan, setPlan] = useState<TaskPlan | null>(null)
+  const [decision, setDecision] = useState<'approved' | 'rejected' | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch(`${API}/api/applications`)
+      .then(async response => {
+        if (!response.ok) throw new Error('Unable to load registered applications.')
+        return response.json() as Promise<Application[]>
+      })
+      .then(setApps)
+      .catch(e => setError(e instanceof Error ? e.message : 'Unable to load registered applications.'))
+      .finally(() => setAppsLoading(false))
+  }, [])
+
+  const generatePlan = async () => {
+    if (!applicationId) { setError('Select a registered application.'); return }
+    if (!instruction.trim()) { setError('Enter a task instruction.'); return }
+    setLoading(true)
+    setError(null)
+    setPlan(null)
+    setDecision(null)
+    try {
+      const response = await fetch(`${API}/api/applications/${applicationId}/plan`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ instruction }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Unable to generate a task plan.')
+      setPlan(result as TaskPlan)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to generate a task plan.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const actionLabel: Record<PlannedAction['action'], string> = {
+    navigate_registered_app: 'Open the registered application Base URL',
+    inspect_page: 'Inspect the current page',
+    find_visible_element: 'Find a visible element',
+    extract_text: 'Extract visible text',
+    verify_element: 'Verify a visible element',
+  }
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
+      <PageHeader eyebrow="PHASE 2.2 · REVIEW ONLY" title="Task Planner" description="Describe a read-only inspection task and review Chronos’s structured plan." />
+      <div className="info-banner exploration-active" role="status" style={{ marginBottom: 16 }}>
+        <ShieldCheck size={16} />
+        <span>Plans are limited to the selected registered application and read-only inspection actions. Approval records your decision in this screen only; it does not open a browser or execute the plan.</span>
+      </div>
+      <section className="card form-section">
+        <div className="form-section-header"><div className="form-section-badge">1</div><div><h3>Describe the task</h3><p>Chronos will prepare a plan for your review.</p></div></div>
+        <div className="form-grid">
+          <div className="form-group form-full">
+            <label>Registered application <span className="required">*</span></label>
+            {appsLoading ? <div className="select-loading"><Loader2 size={14} className="spin" /> Loading applications…</div> : (
+              <select value={applicationId} onChange={e => { setApplicationId(e.target.value); setPlan(null); setDecision(null); setError(null) }}>
+                <option value="">— Select application —</option>
+                {apps.filter(app => app.status !== 'Archived').map(app => <option key={app.id} value={app.id}>{app.name} ({app.environment})</option>)}
+              </select>
+            )}
+          </div>
+          <div className="form-group form-full">
+            <label>Natural-language instruction <span className="required">*</span></label>
+            <textarea
+              value={instruction}
+              onChange={e => { setInstruction(e.target.value); setPlan(null); setDecision(null); setError(null) }}
+              placeholder="Inspect the registered timesheet application and identify the page title, headings, and weekly hours table."
+              rows={4}
+              maxLength={2000}
+            />
+            <div className="char-counter">{instruction.length}/2000</div>
+          </div>
+        </div>
+        {error && <div className="info-banner info-banner-error" role="alert" style={{ marginTop: 12 }}><AlertTriangle size={15} /><span>{error}</span></div>}
+        <button className="button button-primary" onClick={generatePlan} disabled={loading || appsLoading || !applicationId || !instruction.trim()} style={{ marginTop: 14 }}>
+          {loading ? <><Loader2 size={15} className="spin" /> Planning…</> : <><Sparkles size={15} /> Generate plan</>}
+        </button>
+      </section>
+
+      {plan && (
+        <section className="card form-section" style={{ marginTop: 16 }}>
+          <div className="form-section-header"><div className="form-section-badge">2</div><div><h3>Review plan</h3><p>Purpose and proposed actions for {plan.applicationName}</p></div></div>
+          <p><strong>Registered Base URL:</strong> <span style={{ overflowWrap: 'anywhere' }}>{plan.registeredBaseUrl}</span></p>
+          <p><strong>Purpose:</strong> {plan.purpose}</p>
+          <ol className="conditions-list">
+            {plan.actions.map((action, index) => (
+              <li className="condition-item" key={`${action.action}-${index}`}>
+                <span className="badge validation-ready">{index + 1}</span>
+                <span><strong>{actionLabel[action.action]}</strong>{action.description ? `: ${action.description}` : ''}</span>
+              </li>
+            ))}
+          </ol>
+          <div className="info-banner exploration-active" style={{ marginTop: 14 }}>
+            <Info size={15} /><span>This is a planning preview. Approval does not execute actions or start browser exploration.</span>
+          </div>
+          {decision ? (
+            <div className="info-banner" role="status" style={{ marginTop: 12 }}>
+              {decision === 'approved' ? <CheckCircle2 size={15} /> : <X size={15} />}
+              <span>Plan {decision}. No browser actions were executed.</span>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+              <button className="button button-primary" onClick={() => setDecision('approved')}><Check size={15} /> Approve plan</button>
+              <button className="button button-secondary" onClick={() => setDecision('rejected')}><X size={15} /> Reject plan</button>
+            </div>
+          )}
+        </section>
+      )}
     </motion.div>
   )
 }

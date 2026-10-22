@@ -82,6 +82,12 @@ npm run test:backend
 
 The tests use local APEX-like HTML fixtures for successful menu discovery, missing navigation controls, navigation/grid timeouts, and grid evidence checks. They do not contact Oracle.
 
+## Phase 2.2 natural-language task planning
+
+The Task Planner accepts an instruction for an active registered application and returns a structured plan for human review. Phase 2.2 does not execute approved plans or start a browser. Plans may only navigate to the selected application's saved Base URL, inspect a page, find a visible element by plain-language description, extract visible text, or verify a visible element. Arbitrary URLs, selectors, code, credentials, and state-changing actions are rejected server-side.
+
+The default provider is local Ollama. Configure `LLM_PROVIDER=ollama`, `OLLAMA_MODEL`, and optionally `OLLAMA_BASE_URL` in the backend `.env`. An optional OpenAI-compatible provider can be selected with `LLM_PROVIDER=openai-compatible`, `LLM_MODEL`, and `LLM_API_KEY`; keep the key in the backend environment and never use a `VITE_*` variable for provider secrets. Provider errors and model output are validated on the backend. Planning does not require a database schema change.
+
 ## Phase 1 PostgreSQL integration tests
 
 The mock-backed database CRUD tests run with `npm run test:backend`. Real PostgreSQL integration checks are separate and require a dedicated Neon branch:
@@ -120,8 +126,32 @@ Do not commit real credentials or production CSV files. Use [examples/phase4-san
 
 The demo is intentionally compact while preserving separations between shell navigation, upload/validation, run inspection, recordings, reporting, settings, and the backend automation boundary.
 
-## Phase 2.1 generic browser exploration security gate
+## Phase 2.1 Secure Generic Browser Exploration & Read-Only Inspection
 
-Generic browser exploration is not enabled. This service does not yet have a controlled outbound proxy or equivalent network boundary that can pin approved destinations and block private, link-local, metadata, cross-origin, and redirect destinations. Playwright request interception by itself is not an adequate SSRF boundary, so Chronos does not expose a generic browser-launch API or start a browser for registered applications. No exploration results table or schema migration has been added.
+Phase 2.1 enables secure, bounded, strictly read-only inspection of registered web applications through an enforced outbound network security boundary:
 
-The Applications page displays this limitation. The backend binds to `127.0.0.1` because the application has no user authentication or authorization layer. Existing Oracle APEX automation remains separate and retains its `AUTOMATION_READ_ONLY=true`, `ORACLE_WRITE_ENABLED=false`, and `AUTO_UPDATE_ON_UPLOAD=false` safeguards. Generic exploration requires a separately reviewed egress enforcement mechanism and corresponding security tests before it can be enabled.
+1. **Outbound Egress Security Proxy (`backend/exploration/networkSecurity.mjs`)**:
+   - Pinned-IP proxy listening on loopback (`127.0.0.1`) with dynamic port allocation.
+   - All Playwright browser traffic is routed through `--proxy-server`.
+   - Comprehensive IP classification covering all reserved IPv4 and IPv6 CIDRs (RFC 1918, RFC 1122, RFC 3927 link-local/cloud metadata, RFC 6598 carrier-grade NAT, IPv4-mapped IPv6, 6to4, and cloud instance metadata).
+   - Strict port policy (only standard web ports 80 and 443 permitted).
+   - Destination scope enforcement: only exact registered domain or subdomains are permitted.
+   - DNS answer validation: all returned IP addresses must be public; mixed public/private DNS answers are rejected immediately.
+   - Pinned IP socket connection: avoids DNS rebinding and TOCTOU gaps by connecting directly to the validated IP address.
+
+2. **Defense-in-Depth Request Interception & Redirect Gate**:
+   - Playwright route interception validates every navigation and subresource request.
+   - Rejects non-HTTP(S) protocols (`ftp:`, `file:`, `javascript:`, `data:`), embedded credentials, and out-of-scope targets.
+   - Aborts malicious redirects and subresources attempting to reach internal or unapproved destinations.
+
+3. **Strict Read-Only Inspection (`backend/exploration/explorationExtraction.mjs`)**:
+   - Never clicks buttons, fills inputs, submits forms, uploads files, or runs user scripts.
+   - Extracts page metadata: title, meta description, headings hierarchy, discovered links, forms summary, interactive elements count.
+   - Detects authentication requirements (`AUTH_REQUIRED` status when login forms or password inputs are present).
+
+4. **Persistence & UI**:
+   - Stored in PostgreSQL `exploration_results` table and exposed via `/api/v1/applications/:id/explore` and `/api/v1/applications/:id/explorations`.
+   - Frontend Applications view includes an active security banner, "Inspect" triggers, live inspection modal, and historical audit logs.
+
+5. **Security Test Verification**:
+   - Verified by dedicated test suites (`backend/networkSecurity.test.mjs` and `backend/exploration.test.mjs`), asserting that prohibited network requests (loopback, private IPs, malicious redirects, unsafe iframes) never reach internal endpoints.
