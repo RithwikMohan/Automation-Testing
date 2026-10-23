@@ -4,12 +4,15 @@ Vite/React/TypeScript dashboard with an opt-in local Node/Playwright service for
 
 ## Rule-Based Browser Test Suites
 
-The Rule-Based Tests screen imports test cases for any active registered application. CSV import is previewed and validated before it creates a suite. Required columns are test_case_id, name, preconditions, steps, test_data, expected_result, and priority; tags is optional. Preconditions and test_data are JSON arrays/objects. Test steps are newline-separated rules, including within a quoted multiline CSV field. Credential-like columns and test-data keys are rejected. Raw CSV text is not persisted.
+The Rule-Based Tests screen imports test cases for any active registered application. CSV import is previewed and validated before it creates a suite. Required columns are test_case_id, name, preconditions, steps, test_data, expected_result, and priority; tags is optional. Preconditions and test_data are JSON arrays/objects. Test steps may be newline or semicolon separated, including within a quoted multiline CSV field. Credential-like columns and test-data keys are rejected. Raw CSV text is not persisted.
 
 Rule plan version 1.0 supports:
 
     navigate: /path
+    Navigate to /login
+    Open https://example.com/products
     click role=button[name="Continue"]
+    Click the Sign In button
     create role=button[name="Create"]
     update role=button[name="Save"]
     delete role=button[name="Delete"]
@@ -22,8 +25,11 @@ Rule plan version 1.0 supports:
     assert visible role=heading[name="Dashboard"]
     assert text text="Status" contains "Complete"
     assert url contains "/home"
+    Verify that the Dashboard heading is visible
+    Assert that the Email field has value ${test_data.email}
+    Assert that the result count is greater than 0
 
-Supported locators are role/name, exact text, label, placeholder, test ID, and simple ID/class CSS selectors. URL actions resolve against the registered application and must match the primary or explicitly approved navigation origin. Unknown instructions, missing data references, unsafe URLs, ambiguous locators, and cases over 30 actions are rejected during preview.
+Supported locators are role/name, exact text, label, placeholder, test ID, and simple ID/class CSS selectors. URL actions resolve against the registered application and must match the primary or explicitly approved navigation origin. Unknown instructions, missing data references, unsafe URLs, ambiguous locators, and cases over 50 actions are rejected during preview. The rule engine compiles recognized instructions to structured actions; it never evaluates CSV content as code.
 
 Cases, suites, execution records, step results, and artifact metadata use separate browser_test_* tables created non-destructively by the existing database initializer. A unique active-execution index prevents duplicate concurrent runs. Step results and artifacts are written incrementally; interrupted work is marked INTERRUPTED when the backend restarts. Evidence files are stored under ARTIFACT_DIR/browser-tests; deployments should mount that directory on durable storage.
 

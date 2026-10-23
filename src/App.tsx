@@ -1819,6 +1819,8 @@ type BrowserTestSuite = { id: string; name: string; application_name: string; ca
 type BrowserTestCase = { id: string; case_key: string; name: string; priority: string; tags: string[]; plan: { version: string; actions: Array<{ action: string; requiresApproval?: boolean; requiresWriteApproval?: boolean; locator?: { kind: string; name?: string; value?: string } }> }; test_data_keys: string[]; expected_result: string }
 type BrowserTestExecution = { id: string; status: string; case_id: string; case_key: string; case_name: string; suite_name: string; application_name: string; created_at?: string; actual_outcome?: string; error_code?: string; error_details?: string; policy_warnings?: Array<{ reasonCode: string; hostname?: string; category?: string }>; diagnostics?: Array<{ type: string; method?: string; origin?: string | null; path?: string | null; status?: number; resourceType?: string; message?: string; error?: string }>; steps?: Array<{ id: number; step_number: number; action: string; status: string; expected?: unknown; actual?: unknown; error_code?: string; error_details?: string }>; artifacts?: Array<{ id: string; kind: string; content_type: string }> }
 type BrowserTestPreview = { rowNumber: number; testCaseId: string; name: string; priority: string; tags: string[]; testDataKeys: string[]; stepCount: number; errors: string[] }
+const browserTestCsvTemplate = 'test_case_id,name,preconditions,steps,test_data,expected_result,priority,tags\n' +
+  'TC001,Inspect login page,[],"Navigate to /login; Verify that the Sign In heading is visible",{},"Assert that the Sign In heading is visible",High,smoke\n'
 
 function BrowserTestsPage() {
   const [applications, setApplications] = useState<BrowserTestApp[]>([])
@@ -1835,6 +1837,8 @@ function BrowserTestsPage() {
   const [selectedExecution, setSelectedExecution] = useState<BrowserTestExecution | null>(null)
   const [approvalCase, setApprovalCase] = useState<BrowserTestCase | null>(null)
   const [approvalChecked, setApprovalChecked] = useState(false)
+  const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([])
+  const [queuedCases, setQueuedCases] = useState<BrowserTestCase[]>([])
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
 
@@ -1854,6 +1858,8 @@ function BrowserTestsPage() {
   const chooseSuite = async (id: string) => {
     setSuiteId(id)
     setSelectedExecution(null)
+    setSelectedCaseIds([])
+    setQueuedCases([])
     if (!id) { setCases([]); return }
     const response = await fetch(API + '/api/browser-tests/suites/' + id + '/cases')
     if (!response.ok) throw new Error('Unable to load cases for this suite.')
@@ -1919,6 +1925,39 @@ function BrowserTestsPage() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Execution failed.') }
     finally { setBusy(false) }
   }
+  const runCases = async (items: BrowserTestCase[]) => {
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index]
+      const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval)
+      const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status))
+      if (active) continue
+      if (needsApproval) {
+        setQueuedCases(items.slice(index + 1))
+        setApprovalCase(item)
+        setApprovalChecked(false)
+        return
+      }
+      await runCase(item, false)
+    }
+    setSelectedCaseIds([])
+    setQueuedCases([])
+    setMessage('Finished starting the selected test cases. Each case has its own execution and recording.')
+  }
+  const runSelectedCases = async () => {
+    const selected = cases.filter((item) => selectedCaseIds.includes(item.id))
+    if (!selected.length) { setMessage('Select at least one test case to run.'); return }
+    await runCases(selected)
+  }
+  const approveQueuedCase = async () => {
+    if (!approvalCase) return
+    const approvedCase = approvalCase
+    const remaining = queuedCases
+    setApprovalCase(null)
+    setApprovalChecked(false)
+    setQueuedCases([])
+    await runCase(approvedCase, true)
+    await runCases(remaining)
+  }
   const resumeLogin = async () => {
     if (!selectedExecution) return
     const response = await fetch(API + '/api/browser-tests/executions/' + selectedExecution.id + '/resume', { method: 'POST' })
@@ -1949,6 +1988,7 @@ function BrowserTestsPage() {
         <label>Registered application<select value={applicationId} onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}><option value="">Choose an application</option>{applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}</select></label>
         <label>Suite name<input value={suiteName} onChange={(event) => setSuiteName(event.target.value)} placeholder="Smoke tests" /></label>
         <label className="browser-test-file">CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => previewFile(event.currentTarget.files?.[0])} /></label>
+        <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`} download="chronos-browser-tests-template.csv">Download CSV template</a>
       </div>
       <div className="browser-test-help"><strong>Required columns:</strong> test_case_id, name, preconditions, steps, test_data, expected_result, priority. <strong>Optional:</strong> tags. Preconditions and test_data use JSON. Steps use the documented rule syntax below.</div>
       {preview.length > 0 && <><div className="browser-test-preview-title"><strong>{fileName}</strong><span>{preview.length} cases · {previewErrors.length ? previewErrors.length + ' validation errors' : 'all rows valid'}</span></div>
@@ -1967,8 +2007,8 @@ function BrowserTestsPage() {
       </section>
     </div>
 
-    {cases.length > 0 && <section className="card browser-test-cases"><div className="card-heading"><div><div className="eyebrow">VALIDATED ACTION PLANS</div><h2>Test cases</h2><p>Interactive steps require a separate approval for each run. Requests remain limited by the application security policy.</p></div></div>
-      <div className="table-wrap"><table><thead><tr><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
+    {cases.length > 0 && <section className="card browser-test-cases"><div className="card-heading"><div><div className="eyebrow">VALIDATED ACTION PLANS</div><h2>Test cases</h2><p>Interactive steps require a separate approval for each run. Requests remain limited by the application security policy.</p></div><button className="button button-primary" disabled={busy || selectedCaseIds.length === 0} onClick={() => runSelectedCases().catch((error) => setMessage(error.message))}>Run selected ({selectedCaseIds.length})</button></div>
+      <div className="table-wrap"><table><thead><tr><th><input aria-label="Select all test cases" type="checkbox" checked={cases.length > 0 && selectedCaseIds.length === cases.length} onChange={(event) => setSelectedCaseIds(event.target.checked ? cases.map((item) => item.id) : [])} /></th><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><input aria-label={'Select ' + item.case_key} type="checkbox" disabled={active} checked={selectedCaseIds.includes(item.id)} onChange={(event) => setSelectedCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></td><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
     </section>}
 
     {selectedExecution && <section className="card browser-test-execution-detail"><div className="card-heading"><div><div className="eyebrow">EXECUTION DETAIL · {selectedExecution.id}</div><h2>{selectedExecution.case_key} · {selectedExecution.case_name}</h2><p>{selectedExecution.actual_outcome || selectedExecution.error_details || 'Execution is in progress.'}</p></div><StatusBadge status={selectedExecution.status} />{['QUEUED', 'RUNNING'].includes(selectedExecution.status) && <button className="button button-secondary" onClick={() => cancelExecution().catch((error) => setMessage(error.message))}>Cancel run</button>}</div>
@@ -1985,7 +2025,7 @@ function BrowserTestsPage() {
       <p>Create, update, and delete require per-run approval, a same-origin POST form, and a following assertion. Deletes require explicit confirmation. Other methods and unscoped requests remain blocked.</p>
     </section>
 
-    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => setApprovalCase(null)}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application changes. Review each operation and authorize this single run. Writes are limited to the registered origin and the exact POST form action observed for that step; results must pass a following assertion.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Network requests remain GET/HEAD, except the user-controlled login form while the login gate is open.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'I explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'I authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => setApprovalCase(null)}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={() => runCase(approvalCase, true)}>Approve and run once</button></div></section></div>}
+    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application changes. Review each operation and authorize this single run. Writes are limited to the registered origin and the exact POST form action observed for that step; results must pass a following assertion.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Network requests remain GET/HEAD, except the user-controlled login form while the login gate is open.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'I explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'I authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={approveQueuedCase}>Approve and run once{queuedCases.length ? ' · ' + queuedCases.length + ' queued after' : ''}</button></div></section></div>}
   </motion.div>
 }
 

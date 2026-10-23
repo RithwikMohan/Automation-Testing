@@ -1055,3 +1055,45 @@ export async function interruptOrphanedBrowserTestExecutions() {
   return result.rows.length
 }
 
+export async function getBrowserTestStats() {
+  const database = getDatabasePool()
+  const [execStats, suiteStats, appStats] = await Promise.all([
+    database.query(`
+      SELECT
+        COUNT(*) AS total_executions,
+        COUNT(*) FILTER (WHERE status = 'PASSED') AS passed,
+        COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+        COUNT(*) FILTER (WHERE status IN ('SKIPPED', 'BLOCKED', 'INTERRUPTED')) AS skipped,
+        COUNT(*) FILTER (WHERE status = 'CANCELLED') AS cancelled,
+        COUNT(*) FILTER (WHERE status IN ('QUEUED', 'RUNNING')) AS running,
+        MAX(created_at) AS most_recent_execution
+      FROM browser_test_executions
+    `),
+    database.query(`
+      SELECT COUNT(*) AS total_suites,
+             COALESCE(SUM(case_count), 0) AS total_cases
+      FROM (
+        SELECT s.id, COUNT(c.id) AS case_count
+        FROM browser_test_suites s
+        LEFT JOIN browser_test_cases c ON c.suite_id = s.id
+        GROUP BY s.id
+      ) sub
+    `),
+    database.query('SELECT COUNT(*) AS total_applications FROM applications WHERE status = $1', ['Active']),
+  ])
+  const e = execStats.rows[0]
+  const s = suiteStats.rows[0]
+  const a = appStats.rows[0]
+  return {
+    total_executions: Number(e.total_executions),
+    passed: Number(e.passed),
+    failed: Number(e.failed),
+    skipped: Number(e.skipped),
+    cancelled: Number(e.cancelled),
+    running: Number(e.running),
+    most_recent_execution: e.most_recent_execution || null,
+    total_suites: Number(s.total_suites),
+    total_cases: Number(s.total_cases),
+    total_applications: Number(a.total_applications),
+  }
+}

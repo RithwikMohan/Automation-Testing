@@ -183,7 +183,7 @@ export async function executeBrowserTest(executionId, options = {}) {
     if (app.application_auth_method === 'credential_reference') throw new BrowserTestError('CREDENTIAL_PROVIDER_UNAVAILABLE', 'This application uses a credential reference, but no vault provider is configured for browser tests.', 'BLOCKED')
     if (app.application_status !== 'Active') throw new BrowserTestError('APPLICATION_ARCHIVED', 'The registered application is not active.', 'BLOCKED')
     const plan = testCase.plan
-    if (!plan || plan.version !== '1.0' || !Array.isArray(plan.actions) || plan.actions.length > 30) throw new BrowserTestError('INVALID_PLAN', 'The saved action plan is invalid or unsupported.', 'BLOCKED')
+    if (!plan || plan.version !== '1.0' || !Array.isArray(plan.actions) || plan.actions.length > 50) throw new BrowserTestError('INVALID_PLAN', 'The saved action plan is invalid or unsupported.', 'BLOCKED')
     if (plan.actions.some((action) => ['create', 'update', 'delete'].includes(action.action) && (action.requiresApproval !== true || action.requiresWriteApproval !== true))) {
       throw new BrowserTestError('INVALID_PLAN', 'Every saved write action must carry explicit interactive and write approval requirements.', 'BLOCKED')
     }
@@ -416,17 +416,31 @@ export async function executeBrowserTest(executionId, options = {}) {
           const locator = await uniqueLocator(page, action.locator)
           await locator.waitFor({ state: 'visible', timeout: 10000 })
           const observed = safeText(await locator.innerText({ timeout: 10000 }), testCase.test_data)
-          if (!observed.includes(action.expected)) throw new BrowserTestError('ASSERTION_FAILED', 'Visible text did not contain the expected text.')
+          if (!observed.includes(action.expected)) throw new BrowserTestError('ASSERTION_FAILED', 'Visible text did not contain the expected text "' + action.expected + '".')
           actual = observed
           expected = { contains: action.expected }
         } else if (action.action === 'assert_url') {
           const observed = safePageUrl(page)
           const passed = action.operator === 'equals' ? new URL(page.url()).pathname === action.expected : new URL(page.url()).pathname.includes(action.expected)
-          if (!passed) throw new BrowserTestError('ASSERTION_FAILED', 'The current application URL did not match the expected path.')
+          if (!passed) throw new BrowserTestError('ASSERTION_FAILED', 'URL ' + action.operator + ' "' + action.expected + '" — actual path was: ' + new URL(page.url()).pathname)
           actual = observed
           expected = { [action.operator]: action.expected }
+        } else if (action.action === 'assert_value') {
+          const locator = await uniqueLocator(page, action.locator)
+          await locator.waitFor({ state: 'visible', timeout: 10000 })
+          const observedValue = await locator.inputValue({ timeout: 10000 }).catch(() => locator.innerText({ timeout: 10000 }))
+          const expectedValue = String(testCase.test_data[action.dataKey])
+          if (observedValue !== expectedValue) throw new BrowserTestError('ASSERTION_FAILED', 'Field value did not match the expected test data value.')
+          actual = 'Field value matches.'
+          expected = { dataKey: action.dataKey }
+        } else if (action.action === 'assert_count_gt') {
+          const locator = buildLocator(page, action.locator)
+          const count = await locator.count()
+          if (count <= action.threshold) throw new BrowserTestError('ASSERTION_FAILED', 'Element count was ' + count + ', expected greater than ' + action.threshold + '.')
+          actual = 'Count: ' + count
+          expected = { greaterThan: action.threshold }
         } else {
-          throw new BrowserTestError('UNSUPPORTED_ACTION', 'The saved plan contains an unsupported action.', 'BLOCKED')
+          throw new BrowserTestError('UNSUPPORTED_ACTION', 'The saved plan contains an unsupported action: "' + action.action + '".', 'BLOCKED')
         }
         if (policyBlock) throw new BrowserTestError(policyBlock.code, 'A request was stopped by the registered application security policy.', 'BLOCKED')
         if (remoteHttpError) throw new BrowserTestError('REMOTE_HTTP_ERROR', 'The registered application returned HTTP ' + remoteHttpError.status + '.', 'FAILED')

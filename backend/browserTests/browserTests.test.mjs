@@ -110,6 +110,46 @@ test('Rule interpreter produces versioned structured plans and validates test da
   assert.equal(plan.actions[0].url, 'https://app.example.test/profile')
 })
 
+test('Rule interpreter supports documented natural language and semicolon-separated steps', () => {
+  const plan = compileTestCase({
+    rawSteps: 'Navigate to /login; Verify that the Sign In heading is visible; Click the Sign In button; Enter the Email field with ${test_data.email}; Wait until the Dashboard heading is visible; Read the text of Order Status element as status',
+    expectedResult: 'Assert that the Dashboard heading is visible',
+    testData: { email: 'person@example.test' },
+  }, app)
+  assert.deepEqual(plan.actions.map((action) => action.action), [
+    'navigate', 'assert_visible', 'click', 'fill', 'wait_visible', 'read_text', 'assert_visible',
+  ])
+  assert.equal(plan.actions[1].locator.role, 'heading')
+  assert.equal(plan.actions[2].locator.name, 'Sign In')
+  assert.equal(plan.actions[3].dataKey, 'email')
+  assert.equal(plan.actions[5].resultKey, 'status')
+
+  const semicolonInText = compileTestCase({
+    rawSteps: 'assert text text="Status; pending" contains "Status; pending"',
+    expectedResult: '',
+    testData: {},
+  }, app)
+  assert.equal(semicolonInText.actions[0].expected, 'Status; pending')
+
+  const assertions = compileTestCase({
+    rawSteps: 'Navigate to /products',
+    expectedResult: [
+      'Assert that text="Order created" is visible',
+      'Assert that the Status text contains "Complete"',
+      'Assert that the URL contains "/products"',
+      'Assert that the Email field has value ${test_data.email}',
+      'Assert that the result count is greater than 0',
+    ].join('\n'),
+    testData: { email: 'person@example.test' },
+  }, app)
+  assert.deepEqual(assertions.actions.map((action) => action.action), [
+    'navigate', 'assert_visible', 'assert_text', 'assert_url', 'assert_value', 'assert_count_gt',
+  ])
+  assert.equal(assertions.actions[2].locator.value, 'Status')
+  assert.equal(assertions.actions[4].dataKey, 'email')
+  assert.equal(assertions.actions[5].threshold, 0)
+})
+
 test('Rule interpreter validates explicitly approved writes and requires a following result assertion', () => {
   const plan = compileTestCase({
     rawSteps: 'fill label="Name" <- ${test_data.name}\ncreate role=button[name="Create"]\nassert text text="Result" contains "Created"',
@@ -125,7 +165,7 @@ test('Rule interpreter validates explicitly approved writes and requires a follo
 
 test('Rule interpreter rejects unknown instructions, unapproved origins, ambiguous locators, and URL secrets', () => {
   assert.throws(() => compileTestCase({ rawSteps: 'run javascript alert(1)', expectedResult: 'assert url contains "/"', testData: {} }, app), /unsupported instruction/)
-  assert.throws(() => compileTestCase({ rawSteps: 'navigate: https://evil.example.test/', expectedResult: 'assert url contains "/"', testData: {} }, app), /origin is not approved/)
+  assert.throws(() => compileTestCase({ rawSteps: 'navigate: https://evil.example.test/', expectedResult: 'assert url contains "/"', testData: {} }, app), /origin .* is not approved/)
   assert.throws(() => compileTestCase({ rawSteps: 'click button Save', expectedResult: 'assert url contains "/"', testData: {} }, app), /unsupported or ambiguous locator/)
   assert.throws(() => compileTestCase({ rawSteps: 'navigate: /', expectedResult: 'assert url contains "/?token=private"', testData: {} }, app), /secret-like values are not allowed/)
   assert.throws(() => compileTestCase({ rawSteps: 'fill label="Email" <- email', expectedResult: 'assert url contains "/"', testData: { email: 'a' } }, app), /reference/)
@@ -200,6 +240,19 @@ test('Playwright execution verifies assertions, records optional policy blocks, 
     assert.ok(pool.executions.get('exec-pass').policy_warnings.some((warning) => warning.reasonCode === 'RESOURCE_ORIGIN_BLOCKED'))
     assert.ok(pool.executions.get('exec-pass').diagnostics.some((item) => item.type === 'console_error' && item.message.includes('[redacted-sensitive-value]')))
     assert.ok(!JSON.stringify(pool.executions.get('exec-pass').diagnostics).includes('sensitive-fixture'))
+
+    const valueAssertions = fixture('case-value-assertions', '')
+    valueAssertions.test_data = { name: 'Sample record' }
+    valueAssertions.plan = { version: '1.0', actions: [
+      { action: 'fill', locator: { kind: 'label', value: 'Name' }, dataKey: 'name', requiresApproval: true },
+      { action: 'assert_value', locator: { kind: 'label', value: 'Name' }, dataKey: 'name' },
+      { action: 'assert_count_gt', locator: { kind: 'text', value: 'Portal Ready' }, threshold: 0 },
+    ] }
+    pool.cases.set(valueAssertions.id, valueAssertions)
+    pool.executions.set('exec-value-assertions', { id: 'exec-value-assertions' })
+    await executeBrowserTest({ id: 'exec-value-assertions', caseId: valueAssertions.id, approvedInteractions: true }, { ...settings, recordArtifacts: false })
+    assert.equal(pool.executions.get('exec-value-assertions').status, 'PASSED', JSON.stringify(pool.executions.get('exec-value-assertions')))
+    assert.deepEqual(pool.steps.filter((step) => step.params[0] === 'exec-value-assertions').map((step) => step.params[2]), ['fill', 'assert_value', 'assert_count_gt'])
 
     pool.cases.set('case-fail', fixture('case-fail', 'Missing'))
     pool.executions.set('exec-fail', { id: 'exec-fail' })

@@ -39,6 +39,7 @@ import {
   getBrowserTestExecutionById,
   getBrowserTestArtifactById,
   interruptOrphanedBrowserTestExecutions,
+  getBrowserTestStats,
 } from './database.mjs'
 import { runExploration } from './exploration/explorationRunner.mjs'
 import { generateTaskPlan, PlanningError } from './planning/taskPlanning.mjs'
@@ -60,9 +61,7 @@ const writeEnabled = process.env.ORACLE_WRITE_ENABLED === 'true'
 const autoUpdateOnUpload = process.env.AUTO_UPDATE_ON_UPLOAD === 'true'
 const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173'
 
-if (!loginUrl) {
-  throw new Error('ORACLE_LOGIN_URL or ORACLE_BASE_URL must be configured.')
-}
+// Oracle timesheet URL is optional — endpoints requiring it return a clear error if unconfigured.
 
 function json(response, status, body) {
   response.writeHead(status, {
@@ -767,6 +766,13 @@ const server = createServer(async (request, response) => {
     try { return json(response, 200, await listBrowserTestExecutions(Number(searchParams.get('limit') || 100))) } catch (error) { return phase1Error(response, error) }
   }
 
+  if (pathname === '/api/browser-tests/stats' && request.method === 'GET') {
+    try {
+      const stats = await getBrowserTestStats()
+      return json(response, 200, stats)
+    } catch (error) { return phase1Error(response, error) }
+  }
+
   const browserExecutionMatch = pathname.match(/^\/api\/browser-tests\/executions\/([a-zA-Z0-9-]+)$/)
   if (browserExecutionMatch && request.method === 'GET') {
     try {
@@ -899,6 +905,10 @@ const server = createServer(async (request, response) => {
      ------------------------------------------------------------------------- */
   if (request.method !== 'POST' || !['/api/automation/validate-login', '/api/v1/oracle/timesheet/read', '/api/v1/oracle/timesheet/read-batch', '/api/v1/oracle/timesheet/update'].includes(pathname)) {
     return json(response, 404, { error: 'Not found.' })
+  }
+
+  if (!loginUrl) {
+    return json(response, 503, { error: 'Oracle timesheet endpoints require ORACLE_LOGIN_URL or ORACLE_BASE_URL to be configured.' })
   }
 
   try {
