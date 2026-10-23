@@ -5,7 +5,7 @@ import { Activity, AlertTriangle, Archive, ArrowUpRight, BarChart3, Bell, Calend
 import { AnimatePresence, motion } from 'framer-motion'
 import { getRegisteredBaseUrl, MISSING_BASE_URL_MESSAGE } from './explorationTarget'
 
-type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings' | 'applications' | 'create-automation' | 'automations' | 'task-planner'
+type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings' | 'applications' | 'create-automation' | 'automations' | 'task-planner' | 'browser-tests' | 'hcm-hiring'
 type Status = 'Passed' | 'Failed' | 'Running' | 'Pending' | 'Partial'
 type Validation = 'READY' | 'INVALID' | 'PROJECT MISMATCH' | 'EXCEEDS LIMIT' | 'NEEDS DATA' | 'UPDATED' | 'UPDATE FAILED' | 'UPDATE IN PROGRESS' | 'VERIFICATION FAILED'
 type Row = { id: string; username: string; date: string; hours: number; workdescription: string; existing: number | null; validation: Validation; error?: string }
@@ -18,6 +18,8 @@ type Application = {
   id: string
   name: string
   base_url: string
+  approved_resource_origins?: string[]
+  approved_navigation_origins?: string[]
   description: string | null
   category: string | null
   environment: string
@@ -60,7 +62,9 @@ type ExplorationResult = {
   forms: Array<{ action: string | null; method: string; fieldCount: number; fields: Array<{ name: string; type: string; placeholder?: string }>; hasPasswordField: boolean }>
   interactive_elements: { buttonCount: number; linkCount: number; inputCount: number; selectCount: number }
   auth_detected: boolean
-  warnings: string[]
+  warnings: Array<string | { outcome: string; hostname?: string | null; port?: number | null; category?: string; topLevelNavigation?: boolean; reason?: string; explicitResourceEntryNeeded?: boolean }>
+  audit_summary?: { mainDocumentStatus?: number | null; allowedResources?: number; blockedResources?: number; blockedByReason?: Record<string, number>; mainDocumentInspectable?: boolean; partial?: boolean }
+  auditSummary?: { mainDocumentStatus?: number | null; allowedResources?: number; blockedResources?: number; blockedByReason?: Record<string, number>; mainDocumentInspectable?: boolean; partial?: boolean }
   duration_ms: number | null
   created_at: string
 }
@@ -78,6 +82,8 @@ const nav = [
   { id: 'create-automation', label: 'Create Automation', icon: Sparkles },
   { id: 'automations', label: 'Task Definitions', icon: List },
   { id: 'task-planner', label: 'Task Planner', icon: Sparkles },
+  { id: 'browser-tests', label: 'Rule-Based Tests', icon: CheckCircle2 },
+  { id: 'hcm-hiring', label: 'Oracle HCM Hiring', icon: ShieldCheck },
   { id: 'upload', label: 'Upload Test Cases', icon: CloudUpload },
   { id: 'runs', label: 'Test Runs', icon: GitBranch },
   { id: 'recordings', label: 'Recordings', icon: Film },
@@ -236,6 +242,8 @@ function App() {
           {page === 'create-automation' && <CreateAutomationPage navigate={navigate} definition={editingDefinition} />}
           {page === 'automations' && <AutomationsPage navigate={navigate} onEdit={definition => { setEditingDefinition(definition); navigate('create-automation') }} />}
           {page === 'task-planner' && <TaskPlannerPage />}
+          {page === 'browser-tests' && <BrowserTestsPage />}
+          {page === 'hcm-hiring' && <OracleHcmHiringPage />}
           {page === 'upload' && <UploadPage rows={rows} fileName={fileName} fileRef={fileRef} selectFile={selectFile} setRows={setRows} setFileName={setFileName} validRows={validRows.length} processUpload={processUpload} isProcessing={isProcessing} validateReadOnly={validateReadOnly} isReadOnlyValidating={isReadOnlyValidating} autoUpdateOnUpload={autoUpdateOnUpload} />}
           {page === 'runs' && <RunsPage runs={filteredRuns} search={search} setSearch={setSearch} openRun={(run) => { setSelectedRun(run); navigate('run-detail') }} />}
           {page === 'run-detail' && selectedRun && <RunDetails run={selectedRun} back={() => navigate('runs')} />}
@@ -321,6 +329,7 @@ function ExplorationModal({ app, onClose }: { app: Application | null; onClose: 
     if (st === 'SUCCESS') return 'exploration-badge-success'
     if (st === 'AUTH_REQUIRED') return 'exploration-badge-auth'
     if (st === 'SECURITY_BLOCKED') return 'exploration-badge-blocked'
+    if (st === 'PARTIAL') return 'exploration-badge-partial'
     return 'exploration-badge-timeout'
   }
 
@@ -341,7 +350,7 @@ function ExplorationModal({ app, onClose }: { app: Application | null; onClose: 
         </div>
 
         <div className="form-group" style={{ marginBottom: 14 }}>
-          <label>Target Exploration URL (Within registered scope)</label>
+          <label>Target navigation URL (primary origin or explicitly approved navigation origin)</label>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               style={{ flex: 1 }}
@@ -387,8 +396,9 @@ function ExplorationModal({ app, onClose }: { app: Application | null; onClose: 
             {result.warnings && result.warnings.length > 0 && (
               <div className="exploration-warning-box">
                 <strong>Security & Network Audit:</strong>
+                {(result.auditSummary || result.audit_summary) && <div>Main document: {(result.auditSummary || result.audit_summary)?.mainDocumentStatus ?? 'unavailable'} · Allowed requests: {(result.auditSummary || result.audit_summary)?.allowedResources ?? 0} · Blocked requests: {(result.auditSummary || result.audit_summary)?.blockedResources ?? 0}{(result.auditSummary || result.audit_summary)?.partial ? ' · Partial inspection' : ''}</div>}
                 <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
-                  {result.warnings.map((w, idx) => <li key={idx}>{w}</li>)}
+                  {result.warnings.map((w, idx) => <li key={idx}>{typeof w === 'string' ? w : `${w.outcome}: ${w.hostname || 'unknown host'}${w.port ? `:${w.port}` : ''} (${w.category || 'unknown'}${w.topLevelNavigation ? ', top-level navigation' : ''})${w.reason ? ` — ${w.reason}` : ''}${w.explicitResourceEntryNeeded ? ' — explicit resource origin approval required' : ''}`}</li>)}
                 </ul>
               </div>
             )}
@@ -628,6 +638,9 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
                 <button className="icon-button" onClick={() => setDetailApp(null)}><X size={18} /></button>
               </div>
               <p><strong>Base URL:</strong> {detailApp.base_url}</p>
+              <p><strong>Primary origin:</strong> {(() => { try { return new URL(detailApp.base_url).origin } catch { return detailApp.base_url } })()}</p>
+              <p><strong>Approved resource origins:</strong> {(detailApp.approved_resource_origins || []).join(', ') || 'None (primary origin only)'}</p>
+              <p><strong>Approved navigation origins:</strong> {(detailApp.approved_navigation_origins || []).join(', ') || 'None (primary origin only)'}</p>
               <p><strong>Environment:</strong> {detailApp.environment} · <strong>Status:</strong> {detailApp.status}</p>
               <p><strong>Authentication:</strong> {authMethodLabel(detailApp.auth_method)}</p>
               {detailApp.credential_ref && <p><strong>Credential reference:</strong> {detailApp.credential_ref}</p>}
@@ -678,6 +691,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
 }
 
 function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onClose: () => void; onSaved: () => void }) {
+  const [originAudit, setOriginAudit] = useState<Array<{ origin_kind: string; action: string; origin: string; created_at: string }>>([])
   const [form, setForm] = useState({
     name: app?.name ?? '',
     baseUrl: app?.base_url ?? '',
@@ -688,10 +702,17 @@ function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onCl
     credentialRef: app?.credential_ref ?? '',
     loginUrl: app?.login_url ?? '',
     notes: app?.notes ?? '',
+    resourceOrigins: (app?.approved_resource_origins ?? []).join('\n'),
+    navigationOrigins: (app?.approved_navigation_origins ?? []).join('\n'),
   })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!app) return
+    fetch(`${API}/api/applications/${app.id}/origin-audit`).then((response) => response.ok ? response.json() : []).then(setOriginAudit).catch(() => setOriginAudit([]))
+  }, [app])
 
   const set = (k: string, v: string) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => { const n = { ...e }; delete n[k]; return n }) }
 
@@ -720,6 +741,8 @@ function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onCl
         credentialRef: form.credentialRef.trim() || undefined,
         loginUrl: form.loginUrl.trim() || undefined,
         notes: form.notes.trim() || undefined,
+        approvedResourceOrigins: form.resourceOrigins.split(/[\n,]/).map((value) => value.trim()).filter(Boolean),
+        approvedNavigationOrigins: form.navigationOrigins.split(/[\n,]/).map((value) => value.trim()).filter(Boolean),
       }
       const url = app ? `${API}/api/applications/${app.id}` : `${API}/api/applications`
       const method = app ? 'PATCH' : 'POST'
@@ -751,7 +774,18 @@ function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onCl
           <div className="form-group form-full">
             <label>Base URL <span className="required">*</span></label>
             <input value={form.baseUrl} onChange={e => set('baseUrl', e.target.value)} placeholder="https://app.example.com" />
+            <div className="field-hint">Primary origin: {(() => { try { return new URL(form.baseUrl).origin } catch { return 'Enter a valid base URL' } })()}</div>
             {errors.baseUrl && <span className="field-error">{errors.baseUrl}</span>}
+          </div>
+          <div className="form-group form-full">
+            <label>Approved resource origins</label>
+            <textarea value={form.resourceOrigins} onChange={e => set('resourceOrigins', e.target.value)} placeholder={'https://static.example-cdn.com\nhttps://fonts.example.net'} rows={3} />
+            <div className="field-hint">One HTTP or HTTPS origin per line. Allows page resources only; it does not allow navigation. Observed hosts are never approved automatically.</div>
+          </div>
+          <div className="form-group form-full">
+            <label>Approved top-level navigation origins</label>
+            <textarea value={form.navigationOrigins} onChange={e => set('navigationOrigins', e.target.value)} placeholder="https://login.identity-provider.example" rows={2} />
+            <div className="field-hint">Use only for explicitly reviewed authentication or application navigation redirects. This permission is separate from resource origins.</div>
           </div>
           <div className="form-group">
             <label>Environment <span className="required">*</span></label>
@@ -793,6 +827,16 @@ function AppFormModal({ app, onClose, onSaved }: { app: Application | null; onCl
             <textarea value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Internal notes, special configuration, quirks…" rows={2} />
           </div>
         </div>
+
+        {app && <section className="exploration-history-section" style={{ marginTop: 12 }}>
+          <strong>Origin approval audit</strong>
+          {originAudit.length === 0 ? <div className="field-hint">No origin approval changes recorded.</div> : <div className="exploration-item-list" style={{ maxHeight: 130 }}>
+            {originAudit.map((entry, index) => <div className="exploration-item-row" key={`${entry.created_at}-${index}`}>
+              <span>{entry.action === 'added' ? 'Added' : 'Removed'} {entry.origin_kind} origin: <code>{entry.origin}</code></span>
+              <span className="tag-badge">{new Date(entry.created_at).toLocaleString()}</span>
+            </div>)}
+          </div>}
+        </section>}
 
         <div className="modal-footer">
           <button className="button button-secondary" onClick={onClose}>Cancel</button>
@@ -1663,5 +1707,286 @@ function Reports({ navigate }: { navigate: (p: Page) => void }) {
   )
 }
 function SettingsPage() { return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page"><PageHeader eyebrow="CONFIGURATION" title="Settings" description="Manage demo preferences. Real credentials are never stored here." /><div className="settings-grid"><section className="card settings-section"><h2>General</h2><p>Customize how Chronos looks and behaves.</p><label>Product name<input defaultValue="Chronos" /></label><label>Default date range<select><option>Last 7 days</option><option>Last 30 days</option></select></label><label>Theme preference<select><option>Dark (current)</option></select></label></section><section className="card settings-section"><h2>Automation preferences</h2><p>Defaults for simulated runs.</p><label>Default browser<select><option>Chromium</option></select></label><label>Recording preference<select><option>Capture when enabled</option><option>Always off</option></select></label><label>Retry count<select><option>2 retries</option><option>1 retry</option></select></label></section><section className="card settings-section"><h2>Oracle application</h2><p>Connection is reserved for a future backend.</p><label>Demo application URL<input defaultValue="https://demo.oracle-app.invalid" /></label><div className="connection-status"><span className="status-circle" />Not connected</div><div className="security-note"><ShieldCheck size={15} /> Credentials and authentication will be handled securely by the backend.</div></section><section className="card settings-section"><h2>Security &amp; data</h2><p>Your local preview remains in memory only.</p><div className="security-list"><div><ShieldCheck size={16} /><span><strong>No credential persistence</strong><small>Passwords are never rendered, logged, or saved.</small></span></div><div><FileSpreadsheet size={16} /><span><strong>Local file retention</strong><small>Clearing the workflow removes raw CSV data.</small></span></div></div><button className="button button-danger">Clear demo data</button></section></div></motion.div> }
+
+type HcmInspectionApp = { id: string; name: string; base_url: string; auth_method: string; status: string }
+type HcmSnapshot = {
+  state: string
+  pagePath: string
+  snapshot: {
+    ready: boolean
+    message?: string
+    title?: string
+    headings?: string[]
+    fields?: Array<{ label: string; kind: string; required: boolean; optionCount?: number; options: string[]; optionsRedacted?: boolean }>
+    buttons?: string[]
+    validationMessages?: string[]
+  }
+}
+
+function OracleHcmHiringPage() {
+  const [applications, setApplications] = useState<HcmInspectionApp[]>([])
+  const [applicationId, setApplicationId] = useState('')
+  const [accessToken, setAccessToken] = useState('')
+  const [inspectionId, setInspectionId] = useState('')
+  const [state, setState] = useState('CLOSED')
+  const [snapshot, setSnapshot] = useState<HcmSnapshot | null>(null)
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch(API + '/api/applications').then((response) => response.ok ? response.json() : Promise.reject())
+      .then((rows: HcmInspectionApp[]) => {
+        const target = rows.filter((row) => row.base_url === 'https://fa-erzp-dev26-saasfademo1.ds-fa.oraclepdemos.com' && row.auth_method === 'manual' && row.status === 'Active')
+        setApplications(target)
+        if (target.length === 1) setApplicationId(target[0].id)
+      }).catch(() => setMessage('Could not load registered applications.'))
+  }, [])
+
+  const headers = () => ({ 'content-type': 'application/json', 'x-chronos-hr-token': accessToken })
+  const start = async () => {
+    setBusy(true); setMessage('')
+    try {
+      const response = await fetch(API + '/api/oracle-hcm/inspection', { method: 'POST', headers: headers(), body: JSON.stringify({ applicationId }) })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Inspection session could not start.')
+      setInspectionId(payload.id); setState(payload.state); setSnapshot(null)
+      setMessage('A protected Chromium window opened. Sign in manually there, then confirm here. No credentials, screenshots, video, or browser storage state are retained.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Inspection session could not start.') }
+    finally { setBusy(false) }
+  }
+  const resume = async () => {
+    if (!inspectionId) return
+    setBusy(true)
+    try {
+      const response = await fetch(`${API}/api/oracle-hcm/inspection/${inspectionId}/resume`, { method: 'POST', headers: headers() })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Manual authentication was not confirmed.')
+      setState(payload.state); setMessage('Authenticated read-only inspection is active. Use the Chromium window to reach the hiring wizard; actions requiring a POST remain blocked.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Manual authentication was not confirmed.') }
+    finally { setBusy(false) }
+  }
+  const capture = async () => {
+    if (!inspectionId) return
+    setBusy(true)
+    try {
+      const response = await fetch(`${API}/api/oracle-hcm/inspection/${inspectionId}/snapshot`, { headers: { 'x-chronos-hr-token': accessToken } })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Could not inspect the current page.')
+      setSnapshot(payload); setMessage(payload.snapshot.ready ? 'Visible wizard structure captured in memory for this session.' : payload.snapshot.message || 'No wizard structure was found.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not inspect the current page.') }
+    finally { setBusy(false) }
+  }
+  const close = async () => {
+    if (!inspectionId) return
+    setBusy(true)
+    try {
+      await fetch(`${API}/api/oracle-hcm/inspection/${inspectionId}/close`, { method: 'POST', headers: headers() })
+      setInspectionId(''); setState('CLOSED'); setSnapshot(null); setAccessToken(''); setMessage('Inspection browser closed and its in-memory session discarded.')
+    } finally { setBusy(false) }
+  }
+
+  return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page browser-tests-page">
+    <PageHeader eyebrow="ORACLE HCM · PHASE 1" title="Hiring wizard inspection" description="Manually authenticate in an isolated, read-only browser and capture only visible wizard structure." />
+    <section className="card browser-test-import">
+      <div className="card-heading"><div><div className="eyebrow">ACCESS CONTROLLED</div><h2>Protected inspection session</h2><p>The feature is disabled until CHRONOS_HR_ACCESS_TOKEN is configured with a random value of at least 32 characters. The token is held in page memory only.</p></div></div>
+      {message && <div className="info-banner browser-test-message"><Info size={16} /><span>{message}</span></div>}
+      <div className="browser-test-import-controls">
+        <label>Registered Oracle HCM application<select value={applicationId} onChange={(event) => setApplicationId(event.target.value)}><option value="">Choose application</option>{applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}</select></label>
+        <label>HR access token<input type="password" autoComplete="off" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} /></label>
+      </div>
+      <div className="browser-test-help"><strong>Privacy and network policy:</strong> inspect the blank wizard before entering employee data. If a text field contains a value, the snapshot is withheld. No screenshots, video, traces, cookies, input values, or auth state are captured or persisted. Only wizard labels, control types, required flags, eligible business dropdown options, buttons, and visible validation messages are returned. Login POSTs are allowed only to the same-origin password form action while the login gate is open. Other POSTs and unapproved origins stay blocked.</div>
+      <div className="browser-test-approval-actions">
+        {!inspectionId ? <button className="button button-primary" disabled={busy || !applicationId || accessToken.length < 32} onClick={start}>{busy ? 'Opening…' : 'Open manual login browser'}</button> : <>
+          {state === 'WAITING_FOR_MANUAL_LOGIN' && <button className="button button-primary" disabled={busy} onClick={resume}>I signed in manually</button>}
+          {state === 'AUTHENTICATED_READ_ONLY' && <button className="button button-primary" disabled={busy} onClick={capture}>{busy ? 'Inspecting…' : 'Capture visible wizard structure'}</button>}
+          <button className="button button-secondary" disabled={busy} onClick={close}>Close session</button>
+        </>}
+        <span className="badge">{state.replaceAll('_', ' ')}</span>
+      </div>
+    </section>
+    {snapshot?.snapshot.ready && <section className="card browser-test-history">
+      <div className="card-heading"><div><div className="eyebrow">VOLATILE INSPECTION RESULT</div><h2>{snapshot.snapshot.title}</h2><p>Page path: {snapshot.pagePath} · This result is not written to run history.</p></div></div>
+      <h3>Wizard headings</h3><ul>{snapshot.snapshot.headings?.map((item, index) => <li key={index}>{item}</li>)}</ul>
+      <h3>Visible fields and choices</h3><div className="table-wrap"><table><thead><tr><th>Field label</th><th>Control</th><th>Required</th><th>Choices</th></tr></thead><tbody>{snapshot.snapshot.fields?.map((field, index) => <tr key={index}><td>{field.label || 'Unlabeled control'}</td><td>{field.kind}</td><td>{field.required ? 'Yes' : 'No'}</td><td>{field.optionsRedacted ? 'Options omitted by privacy filter' : field.options?.join(', ') || (field.optionCount ? `${field.optionCount} options` : '—')}</td></tr>)}</tbody></table></div>
+      <h3>Buttons and transitions</h3><p>{snapshot.snapshot.buttons?.join(' · ') || 'No buttons detected.'}</p>
+      <h3>Visible validation messages</h3><ul>{snapshot.snapshot.validationMessages?.map((item, index) => <li key={index}>{item}</li>)}</ul>
+    </section>}
+  </motion.div>
+}
+
+type BrowserTestApp = { id: string; name: string; base_url: string }
+type BrowserTestSuite = { id: string; name: string; application_name: string; case_count: number; created_at: string }
+type BrowserTestCase = { id: string; case_key: string; name: string; priority: string; tags: string[]; plan: { version: string; actions: Array<{ action: string; requiresApproval?: boolean; requiresWriteApproval?: boolean; locator?: { kind: string; name?: string; value?: string } }> }; test_data_keys: string[]; expected_result: string }
+type BrowserTestExecution = { id: string; status: string; case_id: string; case_key: string; case_name: string; suite_name: string; application_name: string; created_at?: string; actual_outcome?: string; error_code?: string; error_details?: string; policy_warnings?: Array<{ reasonCode: string; hostname?: string; category?: string }>; diagnostics?: Array<{ type: string; method?: string; origin?: string | null; path?: string | null; status?: number; resourceType?: string; message?: string; error?: string }>; steps?: Array<{ id: number; step_number: number; action: string; status: string; expected?: unknown; actual?: unknown; error_code?: string; error_details?: string }>; artifacts?: Array<{ id: string; kind: string; content_type: string }> }
+type BrowserTestPreview = { rowNumber: number; testCaseId: string; name: string; priority: string; tags: string[]; testDataKeys: string[]; stepCount: number; errors: string[] }
+
+function BrowserTestsPage() {
+  const [applications, setApplications] = useState<BrowserTestApp[]>([])
+  const [suites, setSuites] = useState<BrowserTestSuite[]>([])
+  const [executions, setExecutions] = useState<BrowserTestExecution[]>([])
+  const [cases, setCases] = useState<BrowserTestCase[]>([])
+  const [applicationId, setApplicationId] = useState('')
+  const [suiteId, setSuiteId] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [csvText, setCsvText] = useState('')
+  const [preview, setPreview] = useState<BrowserTestPreview[]>([])
+  const [previewErrors, setPreviewErrors] = useState<string[]>([])
+  const [suiteName, setSuiteName] = useState('')
+  const [selectedExecution, setSelectedExecution] = useState<BrowserTestExecution | null>(null)
+  const [approvalCase, setApprovalCase] = useState<BrowserTestCase | null>(null)
+  const [approvalChecked, setApprovalChecked] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const refresh = async () => {
+    const [appResponse, suiteResponse, runResponse] = await Promise.all([
+      fetch(API + '/api/applications'), fetch(API + '/api/browser-tests/suites'), fetch(API + '/api/browser-tests/executions'),
+    ])
+    if (!appResponse.ok || !suiteResponse.ok || !runResponse.ok) throw new Error('Unable to load browser-test data.')
+    const [appData, suiteData, runData] = await Promise.all([appResponse.json(), suiteResponse.json(), runResponse.json()])
+    setApplications(appData.map((item: BrowserTestApp) => ({ id: item.id, name: item.name, base_url: item.base_url })))
+    setSuites(suiteData)
+    setExecutions(runData)
+    if (!applicationId && appData[0]) setApplicationId(appData[0].id)
+  }
+  useEffect(() => { refresh().catch((error) => setMessage(error.message)) }, [])
+
+  const chooseSuite = async (id: string) => {
+    setSuiteId(id)
+    setSelectedExecution(null)
+    if (!id) { setCases([]); return }
+    const response = await fetch(API + '/api/browser-tests/suites/' + id + '/cases')
+    if (!response.ok) throw new Error('Unable to load cases for this suite.')
+    setCases(await response.json())
+  }
+  const previewFile = async (file?: File) => {
+    if (!file) return
+    setBusy(true); setMessage(''); setPreview([]); setPreviewErrors([])
+    try {
+      if (file.size > 2_000_000) throw new Error('CSV file must be 2 MB or smaller.')
+      const text = await file.text()
+      setFileName(file.name); setSuiteName(file.name.replace(/\.csv$/i, '')); setCsvText(text)
+      const response = await fetch(API + '/api/browser-tests/import/preview', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ applicationId, filename: file.name, csvText: text }),
+      })
+      const data = await response.json()
+      setPreview(data.rows || [])
+      setPreviewErrors([...(data.errors || []), ...((data.rowErrors || []).flatMap((row: { rowNumber: number; errors: string[] }) => row.errors.map((error) => 'CSV row ' + row.rowNumber + ': ' + error)))])
+      if (data.valid) setMessage('Preview is valid. Review the cases, then import the suite.')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'CSV preview failed.') }
+    finally { setBusy(false) }
+  }
+  const importSuite = async () => {
+    setBusy(true); setMessage('')
+    try {
+      const response = await fetch(API + '/api/browser-tests/import', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ applicationId, filename: fileName, name: suiteName || fileName, csvText }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Import failed.')
+      await refresh()
+      await chooseSuite(data.id)
+      setMessage('Imported ' + data.case_count + ' validated cases.')
+      setPreview([]); setCsvText('')
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Import failed.') }
+    finally { setBusy(false) }
+  }
+  const loadExecution = async (id: string) => {
+    const response = await fetch(API + '/api/browser-tests/executions/' + id)
+    if (!response.ok) throw new Error('Unable to load execution details.')
+    const data = await response.json()
+    setSelectedExecution(data)
+    return data as BrowserTestExecution
+  }
+  const runCase = async (item: BrowserTestCase, approved: boolean) => {
+    setBusy(true); setMessage('')
+    try {
+      const response = await fetch(API + '/api/browser-tests/cases/' + item.id + '/execute', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved }),
+      })
+      const started = await response.json()
+      if (!response.ok) throw new Error(started.error || 'Could not start this test.')
+      setApprovalCase(null); setApprovalChecked(false)
+      setMessage('Execution queued. Step results are saved as the test runs.')
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500))
+        const latest = await loadExecution(started.id)
+        if (['PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED'].includes(latest.status)) break
+      }
+      await refresh()
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Execution failed.') }
+    finally { setBusy(false) }
+  }
+  const resumeLogin = async () => {
+    if (!selectedExecution) return
+    const response = await fetch(API + '/api/browser-tests/executions/' + selectedExecution.id + '/resume', { method: 'POST' })
+    const data = await response.json()
+    if (!response.ok) { setMessage(data.error || 'Could not resume the test.'); return }
+    setMessage('Manual login confirmed. The test is continuing.')
+  }
+  const cancelExecution = async () => {
+    if (!selectedExecution) return
+    const response = await fetch(API + '/api/browser-tests/executions/' + selectedExecution.id + '/cancel', { method: 'POST' })
+    const data = await response.json()
+    if (!response.ok) { setMessage(data.error || 'Could not cancel the execution.'); return }
+    setMessage('Cancellation requested. Any in-flight write is treated as uncertain and will not be retried.')
+    await loadExecution(selectedExecution.id)
+  }
+  const previewIsValid = preview.length > 0 && previewErrors.length === 0 && preview.every((row) => row.errors.length === 0)
+  const waitingForLogin = selectedExecution?.status === 'RUNNING' && selectedExecution.actual_outcome?.includes('Waiting for user')
+  const approvalActions = approvalCase?.plan.actions.filter((action) => action.requiresApproval) || []
+  const approvalHasWrites = approvalActions.some((action) => action.requiresWriteApproval)
+  const approvalHasDelete = approvalActions.some((action) => action.action === 'delete')
+
+  return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page browser-tests-page">
+    <PageHeader eyebrow="RULE-BASED BROWSER TESTS" title="Test suites" description="Import deterministic CSV cases, review validated action plans, then run them against registered applications." />
+    {message && <div className="info-banner browser-test-message"><Info size={16} /><span>{message}</span></div>}
+    <section className="card browser-test-import">
+      <div className="card-heading"><div><div className="eyebrow">CSV IMPORT</div><h2>Preview and import cases</h2><p>Quoted commas, escaped quotes, and multiline fields are supported. Passwords and tokens are rejected.</p></div></div>
+      <div className="browser-test-import-controls">
+        <label>Registered application<select value={applicationId} onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}><option value="">Choose an application</option>{applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}</select></label>
+        <label>Suite name<input value={suiteName} onChange={(event) => setSuiteName(event.target.value)} placeholder="Smoke tests" /></label>
+        <label className="browser-test-file">CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => previewFile(event.currentTarget.files?.[0])} /></label>
+      </div>
+      <div className="browser-test-help"><strong>Required columns:</strong> test_case_id, name, preconditions, steps, test_data, expected_result, priority. <strong>Optional:</strong> tags. Preconditions and test_data use JSON. Steps use the documented rule syntax below.</div>
+      {preview.length > 0 && <><div className="browser-test-preview-title"><strong>{fileName}</strong><span>{preview.length} cases · {previewErrors.length ? previewErrors.length + ' validation errors' : 'all rows valid'}</span></div>
+        <div className="table-wrap"><table><thead><tr><th>Row / ID</th><th>Case</th><th>Priority</th><th>Data keys</th><th>Plan actions</th><th>Validation</th></tr></thead><tbody>{preview.map((row) => <tr key={row.rowNumber}><td>{row.rowNumber} · {row.testCaseId}</td><td>{row.name}</td><td>{row.priority}</td><td>{row.testDataKeys.join(', ') || '—'}</td><td>{row.stepCount}</td><td>{row.errors.length ? row.errors.join('; ') : 'Valid'}</td></tr>)}</tbody></table></div>
+        {previewIsValid && <button className="button button-primary" disabled={busy} onClick={importSuite}>{busy ? 'Importing…' : 'Import validated suite'}</button>}
+      </>}
+      {previewErrors.length > 0 && <ul className="browser-test-errors">{previewErrors.slice(0, 20).map((error, index) => <li key={index}>{error}</li>)}</ul>}
+    </section>
+
+    <div className="browser-test-columns">
+      <section className="card browser-test-suites"><div className="card-heading"><div><div className="eyebrow">PERSISTED SUITES</div><h2>Imported suites</h2></div><button className="button button-secondary" onClick={() => refresh().catch((error) => setMessage(error.message))}>Refresh</button></div>
+        {suites.length === 0 ? <div className="empty-recordings"><FileSpreadsheet size={28} /><strong>No browser-test suites yet</strong><span>Preview a CSV to create the first suite.</span></div> : <div className="browser-test-suite-list">{suites.map((suite) => <button key={suite.id} className={'browser-test-suite' + (suiteId === suite.id ? ' selected' : '')} onClick={() => chooseSuite(suite.id).catch((error) => setMessage(error.message))}><span><strong>{suite.name}</strong><small>{suite.application_name} · {suite.case_count} cases</small></span><ChevronRight size={16} /></button>)}</div>}
+      </section>
+      <section className="card browser-test-history"><div className="card-heading"><div><div className="eyebrow">EXECUTION HISTORY</div><h2>Recent browser runs</h2></div></div>
+        {executions.length === 0 ? <div className="empty-recordings"><Activity size={28} /><strong>No browser executions</strong><span>Results will persist here after a test runs.</span></div> : <div className="browser-test-run-list">{executions.slice(0, 30).map((run) => <button key={run.id} className="browser-test-run" onClick={() => loadExecution(run.id).catch((error) => setMessage(error.message))}><span><strong>{run.case_key} · {run.case_name}</strong><small>{run.application_name} · {run.created_at ? new Date(run.created_at).toLocaleString() : ''}</small></span><StatusBadge status={run.status} /></button>)}</div>}
+      </section>
+    </div>
+
+    {cases.length > 0 && <section className="card browser-test-cases"><div className="card-heading"><div><div className="eyebrow">VALIDATED ACTION PLANS</div><h2>Test cases</h2><p>Interactive steps require a separate approval for each run. Requests remain limited by the application security policy.</p></div></div>
+      <div className="table-wrap"><table><thead><tr><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
+    </section>}
+
+    {selectedExecution && <section className="card browser-test-execution-detail"><div className="card-heading"><div><div className="eyebrow">EXECUTION DETAIL · {selectedExecution.id}</div><h2>{selectedExecution.case_key} · {selectedExecution.case_name}</h2><p>{selectedExecution.actual_outcome || selectedExecution.error_details || 'Execution is in progress.'}</p></div><StatusBadge status={selectedExecution.status} />{['QUEUED', 'RUNNING'].includes(selectedExecution.status) && <button className="button button-secondary" onClick={() => cancelExecution().catch((error) => setMessage(error.message))}>Cancel run</button>}</div>
+      {waitingForLogin && <div className="browser-test-auth-prompt"><strong>Manual login is open in the isolated browser window.</strong><span>Complete the login there, then resume the test. Credentials are not captured in screenshots or recordings.</span><button className="button button-primary" onClick={resumeLogin}>Resume after manual login</button></div>}
+      {selectedExecution.error_code && <div className="exploration-warning-box">{selectedExecution.error_code}: {selectedExecution.error_details}</div>}
+      {selectedExecution.policy_warnings?.length ? <div className="exploration-warning-box">Policy warnings: {selectedExecution.policy_warnings.map((item) => item.reasonCode + (item.hostname ? ' · ' + item.hostname : '')).join('; ')}</div> : null}
+      {!!selectedExecution.diagnostics?.length && <details className="browser-test-diagnostics"><summary>Sanitized browser and network diagnostics ({selectedExecution.diagnostics.length})</summary><ul>{selectedExecution.diagnostics.map((item, index) => <li key={index}>{[item.type, item.method, item.origin && item.path ? item.origin + item.path : null, item.status ? 'HTTP ' + item.status : null, item.resourceType, item.message || item.error].filter(Boolean).join(' · ')}</li>)}</ul></details>}
+      {!!selectedExecution.steps?.length && <div className="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Expected</th><th>Actual / error</th></tr></thead><tbody>{selectedExecution.steps.map((step) => <tr key={step.id}><td>{step.step_number}</td><td>{step.action}</td><td>{step.status}</td><td>{JSON.stringify(step.expected)}</td><td>{step.error_details || JSON.stringify(step.actual)}</td></tr>)}</tbody></table></div>}
+      <div className="browser-test-artifacts"><a className="button button-secondary" href={API + '/api/browser-tests/executions/' + selectedExecution.id + '/report'} download>Download report</a>{selectedExecution.artifacts?.map((artifact) => <a key={artifact.id} className="button button-secondary" href={API + '/api/browser-tests/artifacts/' + artifact.id} target="_blank" rel="noreferrer">{artifact.kind === 'screenshot' ? 'View screenshot' : artifact.kind === 'video' ? 'View recording' : 'Download trace'}</a>)}</div>
+    </section>}
+
+    <section className="card browser-test-reference"><div className="card-heading"><div><div className="eyebrow">SUPPORTED RULE SYNTAX · PLAN VERSION 1.0</div><h2>Deterministic action templates</h2></div></div>
+      <pre>{'navigate: /path\nclick role=button[name="Continue"]\nfill label="Email" <- ${test_data.email}\nselect label="Country" <- ${test_data.country}\ncheck label="Accept terms"\nuncheck label="Subscribe"\ncreate role=button[name="Create"]\nupdate role=button[name="Save"]\ndelete role=button[name="Delete"]\nwait visible text="Ready" timeout=5000\nread text="Result" as result\nassert visible role=heading[name="Dashboard"]\nassert text text="Status" contains "Complete"\nassert url contains "/home"'}</pre>
+      <p>Create, update, and delete require per-run approval, a same-origin POST form, and a following assertion. Deletes require explicit confirmation. Other methods and unscoped requests remain blocked.</p>
+    </section>
+
+    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => setApprovalCase(null)}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application changes. Review each operation and authorize this single run. Writes are limited to the registered origin and the exact POST form action observed for that step; results must pass a following assertion.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Network requests remain GET/HEAD, except the user-controlled login form while the login gate is open.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'I explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'I authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => setApprovalCase(null)}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={() => runCase(approvalCase, true)}>Approve and run once</button></div></section></div>}
+  </motion.div>
+}
 
 export default App

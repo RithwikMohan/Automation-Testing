@@ -1,10 +1,10 @@
 import { URL } from 'node:url'
-import { isHostInScope } from './networkSecurity.mjs'
+import { normalizeAllowedOrigin } from './networkSecurity.mjs'
 
 /**
  * Validates an exploration target URL against the registered application's base URL and scope.
  */
-export function validateExplorationUrl(targetUrl, applicationBaseUrl) {
+export function validateExplorationUrl(targetUrl, applicationBaseUrl, applicationNavigationOrigins = []) {
   if (typeof targetUrl !== 'string' || !targetUrl.trim()) {
     throw new Error('Exploration target URL is required.')
   }
@@ -38,8 +38,9 @@ export function validateExplorationUrl(targetUrl, applicationBaseUrl) {
     throw new Error('Application base URL is invalid or malformed.')
   }
 
-  if (!isHostInScope(parsedTarget.hostname, parsedBase.hostname)) {
-    throw new Error(`Exploration target host "${parsedTarget.hostname}" is out of registered scope for "${parsedBase.hostname}".`)
+  const permittedNavigationOrigins = new Set([normalizeAllowedOrigin(parsedBase.origin), ...applicationNavigationOrigins.map(normalizeAllowedOrigin)])
+  if (!permittedNavigationOrigins.has(normalizeAllowedOrigin(parsedTarget.origin))) {
+    throw new Error(`Exploration target origin "${parsedTarget.origin}" is not an approved navigation origin.`)
   }
 
   // Normalize target URL
@@ -74,7 +75,7 @@ export function validateExplorationPayload(payload, application) {
   }
 
   const rawTargetUrl = payload.targetUrl || application.base_url
-  const validatedUrl = validateExplorationUrl(rawTargetUrl, application.base_url)
+  const validatedUrl = validateExplorationUrl(rawTargetUrl, application.base_url, application.approved_navigation_origins || [])
 
   let timeoutMs = 15000
   if (payload.timeoutMs !== undefined) {
@@ -90,6 +91,9 @@ export function validateExplorationPayload(payload, application) {
     targetUrl: validatedUrl.normalizedUrl,
     hostname: validatedUrl.hostname,
     baseHost: validatedUrl.baseHost,
+    primaryOrigin: new URL(application.base_url).origin,
+    resourceOrigins: application.approved_resource_origins || [],
+    navigationOrigins: application.approved_navigation_origins || [],
     timeoutMs,
   }
 }

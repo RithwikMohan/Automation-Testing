@@ -12,6 +12,14 @@ import {
   getApplicationById,
   getAutomationDefinitionById,
   getDatabasePool,
+  getBrowserTestCaseById,
+  getBrowserTestExecutionById,
+  importBrowserTestSuite,
+  initializeDatabase,
+  createBrowserTestExecution,
+  updateBrowserTestExecution,
+  persistBrowserTestStepResult,
+  persistBrowserTestArtifact,
   setDatabasePoolForTesting,
   updateApplication,
   updateAutomationDefinition,
@@ -45,16 +53,27 @@ test('PostgreSQL integration: application and task CRUD, FK, safety, reconnect p
   const productionUrl = process.env.DATABASE_URL
   const appIds = []
   const taskIds = []
+  const browserSuiteIds = []
+  const browserExecutionIds = []
   setDatabasePoolForTesting(null)
   process.env.DATABASE_URL = testDatabaseUrl
   try {
     let database = getDatabasePool()
+    await initializeDatabase()
     const schema = await database.query(`
       SELECT to_regclass('public.applications') AS applications,
-             to_regclass('public.automation_definitions') AS definitions
+             to_regclass('public.automation_definitions') AS definitions,
+             to_regclass('public.browser_test_suites') AS browser_test_suites,
+             to_regclass('public.browser_test_executions') AS browser_test_executions,
+             to_regclass('public.browser_test_step_results') AS browser_test_step_results,
+             to_regclass('public.browser_test_artifacts') AS browser_test_artifacts
     `)
     assert.equal(schema.rows[0].applications, 'applications')
     assert.equal(schema.rows[0].definitions, 'automation_definitions')
+    assert.equal(schema.rows[0].browser_test_suites, 'browser_test_suites')
+    assert.equal(schema.rows[0].browser_test_executions, 'browser_test_executions')
+    assert.equal(schema.rows[0].browser_test_step_results, 'browser_test_step_results')
+    assert.equal(schema.rows[0].browser_test_artifacts, 'browser_test_artifacts')
 
     const app = await createApplication({
       name: `Chronos integration ${randomUUID()}`,
@@ -68,6 +87,41 @@ test('PostgreSQL integration: application and task CRUD, FK, safety, reconnect p
     const updatedApp = await updateApplication(app.id, { name: `${app.name} updated`, notes: 'isolated postgres integration record' })
     assert.equal(updatedApp.name, `${app.name} updated`)
     assert.equal(updatedApp.notes, 'isolated postgres integration record')
+
+    const suiteId = randomUUID()
+    const testCaseId = randomUUID()
+    const executionId = randomUUID()
+    const suite = await importBrowserTestSuite({
+      id: suiteId,
+      applicationId: app.id,
+      name: 'Chronos browser test ' + randomUUID(),
+      sourceFilename: 'integration.csv',
+      cases: [{
+        id: testCaseId,
+        caseKey: 'INTEGRATION-' + randomUUID().slice(0, 8),
+        name: 'Read-only browser assertion',
+        preconditions: [],
+        plan: { version: '1.0', actions: [{ action: 'assert_url', operator: 'contains', expected: '/' }] },
+        testData: {},
+        expectedResult: 'assert url contains "/"',
+        priority: 'normal',
+        tags: ['integration'],
+      }],
+    })
+    browserSuiteIds.push(suite.id)
+    const storedCase = await getBrowserTestCaseById(testCaseId)
+    assert.equal(storedCase.name, 'Read-only browser assertion')
+    assert.deepEqual(storedCase.plan.actions[0], { action: 'assert_url', operator: 'contains', expected: '/' })
+    const queued = await createBrowserTestExecution({ id: executionId, suiteId, caseId: testCaseId, applicationId: app.id, approvedInteractions: false, expectedOutcome: 'assert url contains "/"' })
+    browserExecutionIds.push(queued.id)
+    await updateBrowserTestExecution(executionId, { status: 'RUNNING', startedAt: new Date() })
+    await persistBrowserTestStepResult({ executionId, stepNumber: 1, action: 'assert_url', status: 'PASSED', expected: { contains: '/' }, actual: { url: 'https://integration.example.test/' }, startedAt: new Date(), completedAt: new Date(), durationMs: 3 })
+    await persistBrowserTestArtifact({ id: 'bta-' + randomUUID(), executionId, kind: 'screenshot', relativePath: 'browser-tests/' + executionId + '/checkpoint.png', contentType: 'image/png', sizeBytes: 42 })
+    await updateBrowserTestExecution(executionId, { status: 'PASSED', actualOutcome: 'All assertions passed.', completedAt: new Date(), durationMs: 9 })
+    let persistedExecution = await getBrowserTestExecutionById(executionId)
+    assert.equal(persistedExecution.status, 'PASSED')
+    assert.equal(persistedExecution.steps.length, 1)
+    assert.equal(persistedExecution.artifacts.length, 1)
 
     const definition = await createAutomationDefinition({
       applicationId: app.id,
@@ -109,14 +163,19 @@ test('PostgreSQL integration: application and task CRUD, FK, safety, reconnect p
     database = getDatabasePool()
     const persistedApp = await getApplicationById(app.id)
     const persistedDefinition = await getAutomationDefinitionById(definition.id)
+    persistedExecution = await getBrowserTestExecutionById(executionId)
     assert.equal(persistedApp.name, updatedApp.name)
     assert.equal(persistedDefinition.name, updatedDefinition.name)
     assert.equal(persistedDefinition.safety_settings.max_actions, 32)
+    assert.equal(persistedExecution.status, 'PASSED')
+    assert.equal(persistedExecution.steps[0].status, 'PASSED')
 
     assert.equal((await archiveAutomationDefinition(definition.id)).status, 'Archived')
     assert.equal((await archiveApplication(app.id)).status, 'Archived')
   } finally {
     try {
+      if (browserExecutionIds.length) await getDatabasePool().query('DELETE FROM browser_test_executions WHERE id = ANY($1::text[])', [browserExecutionIds])
+      if (browserSuiteIds.length) await getDatabasePool().query('DELETE FROM browser_test_suites WHERE id = ANY($1::text[])', [browserSuiteIds])
       if (taskIds.length) await getDatabasePool().query('DELETE FROM automation_definitions WHERE id = ANY($1::text[])', [taskIds])
       if (appIds.length) await getDatabasePool().query('DELETE FROM applications WHERE id = ANY($1::text[])', [appIds])
     } finally {

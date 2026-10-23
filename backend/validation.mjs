@@ -1,4 +1,5 @@
 import { URL } from 'node:url'
+import { normalizeAllowedOrigin } from './exploration/networkSecurity.mjs'
 
 export const ALLOWED_ENVIRONMENTS = ['Development', 'Testing', 'Staging', 'Production']
 export const ALLOWED_AUTH_METHODS = ['none', 'manual', 'credential_reference', 'other']
@@ -79,6 +80,14 @@ export function validateApplicationPayload(payload, isUpdate = false) {
   }
 
   const validated = {}
+
+  for (const field of ['approvedResourceOrigins', 'approvedNavigationOrigins']) {
+    const value = payload[field] ?? (isUpdate ? undefined : [])
+    if (value === undefined) continue
+    if (!Array.isArray(value) || value.length > 100) throw new Error(`${field} must be an array of at most 100 approved origins.`)
+    const normalized = [...new Set(value.map((origin) => normalizeAllowedOrigin(origin)))]
+    validated[field] = normalized
+  }
 
   // Name
   if (!isUpdate || payload.name !== undefined) {

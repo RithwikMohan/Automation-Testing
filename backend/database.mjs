@@ -81,6 +81,8 @@ export async function initializeDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE applications ADD COLUMN IF NOT EXISTS approved_resource_origins JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE applications ADD COLUMN IF NOT EXISTS approved_navigation_origins JSONB NOT NULL DEFAULT '[]'::jsonb;
     CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
     CREATE INDEX IF NOT EXISTS idx_applications_updated_at ON applications(updated_at DESC);
 
@@ -115,11 +117,105 @@ export async function initializeDatabase() {
       interactive_elements JSONB NOT NULL DEFAULT '{}'::jsonb,
       auth_detected BOOLEAN NOT NULL DEFAULT false,
       warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+      audit_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
       duration_ms INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE exploration_results ADD COLUMN IF NOT EXISTS audit_summary JSONB NOT NULL DEFAULT '{}'::jsonb;
+    CREATE TABLE IF NOT EXISTS application_origin_audit (
+      id BIGSERIAL PRIMARY KEY,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+      origin_kind TEXT NOT NULL CHECK (origin_kind IN ('resource', 'navigation')),
+      action TEXT NOT NULL CHECK (action IN ('added', 'removed')),
+      origin TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_exploration_results_app_id ON exploration_results(application_id);
     CREATE INDEX IF NOT EXISTS idx_exploration_results_created_at ON exploration_results(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS browser_test_suites (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL,
+      source_filename TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_test_suites_app ON browser_test_suites(application_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS browser_test_cases (
+      id TEXT PRIMARY KEY,
+      suite_id TEXT NOT NULL REFERENCES browser_test_suites(id) ON DELETE CASCADE,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE RESTRICT,
+      case_key TEXT NOT NULL,
+      name TEXT NOT NULL,
+      preconditions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      plan JSONB NOT NULL,
+      test_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      expected_result TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(application_id, case_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_test_cases_suite ON browser_test_cases(suite_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_test_case_key_application
+      ON browser_test_cases(application_id, lower(case_key));
+
+    CREATE TABLE IF NOT EXISTS browser_test_executions (
+      id TEXT PRIMARY KEY,
+      suite_id TEXT NOT NULL REFERENCES browser_test_suites(id) ON DELETE RESTRICT,
+      case_id TEXT NOT NULL REFERENCES browser_test_cases(id) ON DELETE RESTRICT,
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED')),
+      approved_interactions BOOLEAN NOT NULL DEFAULT false,
+      expected_outcome TEXT,
+      actual_outcome TEXT,
+      policy_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+      diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb,
+      error_code TEXT,
+      error_details TEXT,
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      duration_ms INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS policy_warnings JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE browser_test_executions DROP CONSTRAINT IF EXISTS browser_test_executions_status_check;
+    ALTER TABLE browser_test_executions ADD CONSTRAINT browser_test_executions_status_check
+      CHECK (status IN ('QUEUED', 'RUNNING', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED'));
+    CREATE INDEX IF NOT EXISTS idx_browser_test_executions_case ON browser_test_executions(case_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_browser_test_executions_suite ON browser_test_executions(suite_id, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_test_one_active_case
+      ON browser_test_executions(case_id) WHERE status IN ('QUEUED', 'RUNNING');
+
+    CREATE TABLE IF NOT EXISTS browser_test_step_results (
+      id BIGSERIAL PRIMARY KEY,
+      execution_id TEXT NOT NULL REFERENCES browser_test_executions(id) ON DELETE CASCADE,
+      step_number INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('PASSED', 'FAILED', 'BLOCKED', 'SKIPPED')),
+      expected JSONB,
+      actual JSONB,
+      error_code TEXT,
+      error_details TEXT,
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      UNIQUE(execution_id, step_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_test_step_execution ON browser_test_step_results(execution_id, step_number);
+
+    CREATE TABLE IF NOT EXISTS browser_test_artifacts (
+      id TEXT PRIMARY KEY,
+      execution_id TEXT NOT NULL REFERENCES browser_test_executions(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('screenshot', 'video', 'trace', 'report')),
+      relative_path TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size_bytes BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_test_artifacts_execution ON browser_test_artifacts(execution_id, created_at);
   `)
 }
 
@@ -317,8 +413,8 @@ export async function createApplication(data) {
 
   const result = await database.query(
     `INSERT INTO applications
-     (id, name, base_url, description, category, environment, auth_method, credential_ref, login_url, notes, status, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+     (id, name, base_url, description, category, environment, auth_method, credential_ref, login_url, notes, status, approved_resource_origins, approved_navigation_origins, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $14)
      RETURNING *`,
     [
       id,
@@ -332,6 +428,8 @@ export async function createApplication(data) {
       data.loginUrl || null,
       data.notes || null,
       data.status || 'Active',
+      JSON.stringify(data.approvedResourceOrigins || []),
+      JSON.stringify(data.approvedNavigationOrigins || []),
       now,
     ],
   )
@@ -421,38 +519,69 @@ export async function getApplicationById(id) {
 
 export async function updateApplication(id, updates) {
   const database = getDatabasePool()
-  const existing = await database.query('SELECT * FROM applications WHERE id = $1', [id])
-  if (!existing.rows[0]) return null
-
-  const fields = []
-  const params = [id]
-
-  const allowedFields = {
-    name: 'name',
-    baseUrl: 'base_url',
-    description: 'description',
-    category: 'category',
-    environment: 'environment',
-    authMethod: 'auth_method',
-    credentialRef: 'credential_ref',
-    loginUrl: 'login_url',
-    notes: 'notes',
-    status: 'status',
-  }
-
-  for (const [key, col] of Object.entries(allowedFields)) {
-    if (updates[key] !== undefined) {
-      params.push(updates[key])
-      fields.push(`${col} = $${params.length}`)
+  const client = database.connect ? await database.connect() : database
+  const transactional = client !== database
+  try {
+    if (transactional) await client.query('BEGIN')
+    const existing = await client.query(`SELECT * FROM applications WHERE id = $1${transactional ? ' FOR UPDATE' : ''}`, [id])
+    if (!existing.rows[0]) {
+      if (transactional) await client.query('COMMIT')
+      return null
     }
+
+    const fields = []
+    const params = [id]
+    const allowedFields = {
+      name: 'name', baseUrl: 'base_url', description: 'description', category: 'category',
+      environment: 'environment', authMethod: 'auth_method', credentialRef: 'credential_ref',
+      loginUrl: 'login_url', notes: 'notes', status: 'status',
+      approvedResourceOrigins: 'approved_resource_origins', approvedNavigationOrigins: 'approved_navigation_origins',
+    }
+    for (const [key, col] of Object.entries(allowedFields)) {
+      if (updates[key] === undefined) continue
+      const isOrigins = key === 'approvedResourceOrigins' || key === 'approvedNavigationOrigins'
+      params.push(isOrigins ? JSON.stringify(updates[key]) : updates[key])
+      fields.push(`${col} = $${params.length}${isOrigins ? '::jsonb' : ''}`)
+    }
+    if (fields.length === 0) {
+      if (transactional) await client.query('COMMIT')
+      return existing.rows[0]
+    }
+
+    fields.push('updated_at = now()')
+    const result = await client.query(`UPDATE applications SET ${fields.join(', ')} WHERE id = $1 RETURNING *`, params)
+    for (const [field, kind, column] of [
+      ['approvedResourceOrigins', 'resource', 'approved_resource_origins'],
+      ['approvedNavigationOrigins', 'navigation', 'approved_navigation_origins'],
+    ]) {
+      if (updates[field] === undefined) continue
+      const rawBefore = existing.rows[0][column] || []
+      const before = typeof rawBefore === 'string' ? JSON.parse(rawBefore) : rawBefore
+      const after = updates[field] || []
+      for (const origin of after.filter((item) => !before.includes(item))) {
+        await client.query('INSERT INTO application_origin_audit (application_id, origin_kind, action, origin) VALUES ($1, $2, $3, $4)', [id, kind, 'added', origin])
+      }
+      for (const origin of before.filter((item) => !after.includes(item))) {
+        await client.query('INSERT INTO application_origin_audit (application_id, origin_kind, action, origin) VALUES ($1, $2, $3, $4)', [id, kind, 'removed', origin])
+      }
+    }
+    if (transactional) await client.query('COMMIT')
+    return result.rows[0]
+  } catch (error) {
+    if (transactional) await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    if (transactional) client.release()
   }
+}
 
-  if (fields.length === 0) return existing.rows[0]
-
-  fields.push('updated_at = now()')
-  const query = `UPDATE applications SET ${fields.join(', ')} WHERE id = $1 RETURNING *`
-  const result = await database.query(query, params)
-  return result.rows[0]
+export async function listApplicationOriginAudit(id) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    'SELECT origin_kind, action, origin, created_at FROM application_origin_audit WHERE application_id = $1 ORDER BY created_at DESC LIMIT 100',
+    [id],
+  )
+  return result.rows
 }
 
 export async function archiveApplication(id) {
@@ -697,8 +826,8 @@ export async function persistExplorationResult(result) {
   const database = getDatabasePool()
   const res = await database.query(
     `INSERT INTO exploration_results
-     (id, application_id, target_url, status, title, meta_description, headings, links, forms, interactive_elements, auth_detected, warnings, duration_ms, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     (id, application_id, target_url, status, title, meta_description, headings, links, forms, interactive_elements, auth_detected, warnings, audit_summary, duration_ms, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      ON CONFLICT (id) DO UPDATE SET
        status = EXCLUDED.status,
        title = EXCLUDED.title,
@@ -709,6 +838,7 @@ export async function persistExplorationResult(result) {
        interactive_elements = EXCLUDED.interactive_elements,
        auth_detected = EXCLUDED.auth_detected,
        warnings = EXCLUDED.warnings,
+       audit_summary = EXCLUDED.audit_summary,
        duration_ms = EXCLUDED.duration_ms
      RETURNING *`,
     [
@@ -724,6 +854,7 @@ export async function persistExplorationResult(result) {
       JSON.stringify(result.interactiveElements || {}),
       Boolean(result.authDetected),
       JSON.stringify(result.warnings || []),
+      JSON.stringify(result.auditSummary || {}),
       result.durationMs || null,
       result.createdAt || new Date(),
     ],
@@ -748,5 +879,179 @@ export async function getExplorationResultById(id) {
   const database = getDatabasePool()
   const res = await database.query('SELECT * FROM exploration_results WHERE id = $1', [id])
   return res.rows[0] || null
+}
+
+export async function importBrowserTestSuite({ id, applicationId, name, sourceFilename, cases }) {
+  const database = getDatabasePool()
+  const client = await database.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      'INSERT INTO browser_test_suites (id, application_id, name, source_filename) VALUES ($1, $2, $3, $4)',
+      [id, applicationId, name, sourceFilename || null],
+    )
+    for (const item of cases) {
+      await client.query(
+        `INSERT INTO browser_test_cases
+         (id, suite_id, application_id, case_key, name, preconditions, plan, test_data, expected_result, priority, tags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [item.id, id, applicationId, item.caseKey, item.name, JSON.stringify(item.preconditions), JSON.stringify(item.plan), JSON.stringify(item.testData), item.expectedResult, item.priority, JSON.stringify(item.tags)],
+      )
+    }
+    await client.query('COMMIT')
+    return { id, application_id: applicationId, name, source_filename: sourceFilename || null, case_count: cases.length }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+export async function listBrowserTestSuites() {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT s.*, a.name AS application_name, COUNT(c.id)::int AS case_count
+     FROM browser_test_suites s
+     JOIN applications a ON a.id = s.application_id
+     LEFT JOIN browser_test_cases c ON c.suite_id = s.id
+     GROUP BY s.id, a.name
+     ORDER BY s.created_at DESC`,
+  )
+  return result.rows
+}
+
+export async function listBrowserTestCases(suiteId) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    'SELECT * FROM browser_test_cases WHERE suite_id = $1 ORDER BY created_at, case_key',
+    [suiteId],
+  )
+  return result.rows
+}
+
+export async function findBrowserTestCaseKeys(applicationId, caseKeys) {
+  if (!caseKeys.length) return []
+  const database = getDatabasePool()
+  const result = await database.query(
+    'SELECT case_key FROM browser_test_cases WHERE application_id = $1 AND lower(case_key) = ANY($2::text[])',
+    [applicationId, caseKeys.map((key) => key.toLowerCase())],
+  )
+  return result.rows.map((row) => row.case_key)
+}
+
+export async function getBrowserTestCaseById(id) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT c.*, s.name AS suite_name, a.name AS application_name, a.base_url AS application_base_url,
+       a.status AS application_status, a.auth_method AS application_auth_method, a.login_url AS application_login_url,
+       a.approved_navigation_origins, a.approved_resource_origins
+     FROM browser_test_cases c
+     JOIN browser_test_suites s ON s.id = c.suite_id
+     JOIN applications a ON a.id = c.application_id
+     WHERE c.id = $1`,
+    [id],
+  )
+  return result.rows[0] || null
+}
+
+export async function createBrowserTestExecution({ id, suiteId, caseId, applicationId, approvedInteractions, expectedOutcome }) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `INSERT INTO browser_test_executions
+     (id, suite_id, case_id, application_id, status, approved_interactions, expected_outcome)
+     VALUES ($1, $2, $3, $4, 'QUEUED', $5, $6) RETURNING *`,
+    [id, suiteId, caseId, applicationId, Boolean(approvedInteractions), expectedOutcome],
+  )
+  return result.rows[0]
+}
+
+export async function updateBrowserTestExecution(id, updates) {
+  const database = getDatabasePool()
+  const allowed = {
+    status: 'status', actualOutcome: 'actual_outcome', errorCode: 'error_code', errorDetails: 'error_details',
+    startedAt: 'started_at', completedAt: 'completed_at', durationMs: 'duration_ms', policyWarnings: 'policy_warnings', diagnostics: 'diagnostics',
+  }
+  const fields = []
+  const params = [id]
+  for (const [key, column] of Object.entries(allowed)) {
+    if (updates[key] !== undefined) {
+      params.push(['policyWarnings', 'diagnostics'].includes(key) ? JSON.stringify(updates[key]) : updates[key])
+      fields.push(column + ' = $' + params.length)
+    }
+  }
+  if (!fields.length) return null
+  const result = await database.query('UPDATE browser_test_executions SET ' + fields.join(', ') + ' WHERE id = $1 RETURNING *', params)
+  return result.rows[0] || null
+}
+
+export async function persistBrowserTestStepResult({ executionId, stepNumber, action, status, expected, actual, errorCode, errorDetails, startedAt, completedAt, durationMs }) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `INSERT INTO browser_test_step_results
+     (execution_id, step_number, action, status, expected, actual, error_code, error_details, started_at, completed_at, duration_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+    [executionId, stepNumber, action, status, expected === undefined ? null : JSON.stringify(expected), actual === undefined ? null : JSON.stringify(actual), errorCode || null, errorDetails || null, startedAt, completedAt, durationMs],
+  )
+  return result.rows[0]
+}
+
+export async function persistBrowserTestArtifact({ id, executionId, kind, relativePath, contentType, sizeBytes }) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `INSERT INTO browser_test_artifacts (id, execution_id, kind, relative_path, content_type, size_bytes)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [id, executionId, kind, relativePath, contentType, sizeBytes ?? null],
+  )
+  return result.rows[0]
+}
+
+export async function getBrowserTestArtifactById(id) {
+  const database = getDatabasePool()
+  const result = await database.query('SELECT * FROM browser_test_artifacts WHERE id = $1', [id])
+  return result.rows[0] || null
+}
+
+export async function listBrowserTestExecutions(limit = 100) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT e.*, c.case_key, c.name AS case_name, s.name AS suite_name, a.name AS application_name
+     FROM browser_test_executions e
+     JOIN browser_test_cases c ON c.id = e.case_id
+     JOIN browser_test_suites s ON s.id = e.suite_id
+     JOIN applications a ON a.id = e.application_id
+     ORDER BY e.created_at DESC LIMIT $1`,
+    [Math.max(1, Math.min(500, Number(limit) || 100))],
+  )
+  return result.rows
+}
+
+export async function getBrowserTestExecutionById(id) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT e.*, c.case_key, c.name AS case_name, c.plan, c.expected_result, s.name AS suite_name, a.name AS application_name
+     FROM browser_test_executions e
+     JOIN browser_test_cases c ON c.id = e.case_id
+     JOIN browser_test_suites s ON s.id = e.suite_id
+     JOIN applications a ON a.id = e.application_id
+     WHERE e.id = $1`,
+    [id],
+  )
+  if (!result.rows[0]) return null
+  const [steps, artifacts] = await Promise.all([
+    database.query('SELECT * FROM browser_test_step_results WHERE execution_id = $1 ORDER BY step_number', [id]),
+    database.query('SELECT * FROM browser_test_artifacts WHERE execution_id = $1 ORDER BY created_at', [id]),
+  ])
+  return { ...result.rows[0], steps: steps.rows, artifacts: artifacts.rows }
+}
+
+export async function interruptOrphanedBrowserTestExecutions() {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `UPDATE browser_test_executions SET status = 'INTERRUPTED', completed_at = now(),
+       error_code = 'WORKER_RESTARTED', error_details = 'Execution was interrupted when the browser-test worker restarted.'
+     WHERE status IN ('QUEUED', 'RUNNING') RETURNING id`,
+  )
+  return result.rows.length
 }
 

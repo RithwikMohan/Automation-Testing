@@ -124,6 +124,7 @@ const BLOCKED_IPV6_RANGES = [
 const IPV4_MAPPED_IPV6_MASK = ipv6Cidr('::ffff:0:0/96')
 const IPV4_TRANSLATED_IPV6_MASK = ipv6Cidr('64:ff9b::/96')
 const IPV6_6TO4_MASK = ipv6Cidr('2002::/16')
+const IPV6_GLOBAL_UNICAST = ipv6Cidr('2000::/3')
 
 /**
  * Checks whether an IP address is private, loopback, link-local, reserved, or prohibited.
@@ -182,6 +183,10 @@ export function isPrivateOrBlockedIp(ipString) {
       }
     }
 
+    if (!IPV6_GLOBAL_UNICAST.matches(parsed.val)) {
+      return { blocked: true, reason: 'IPv6 address is outside global unicast space.', canonical: parsed.canonical }
+    }
+
     return { blocked: false, canonical: parsed.canonical }
   }
 
@@ -228,6 +233,62 @@ export function isHostInScope(targetHost, allowedBaseHost) {
   return false
 }
 
+export function normalizeAllowedOrigin(value) {
+  let url
+  try { url = new URL(String(value)) } catch { throw new Error('Allowed origin must be a valid HTTP or HTTPS origin.') }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('Allowed origin must contain only an HTTP or HTTPS origin (scheme, host, and optional standard port).')
+  }
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+  if (!['80', '443'].includes(port)) throw new Error('Only standard web ports 80 and 443 can be approved.')
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '')
+  if (!hostname || isBlockedHostname(hostname)) throw new Error('This hostname cannot be approved.')
+  if (net.isIP(hostname.replace(/^\[|\]$/g, '')) && isPrivateOrBlockedIp(hostname).blocked) throw new Error('A private or prohibited IP address cannot be approved.')
+  return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ''}`
+}
+
+/** Permit only a form POST to a rendered same-origin login action during the manual auth gate. */
+export function isManualLoginPostAllowed({ method, targetUrl, contentType, manualAuthOrigin, manualAuthPaths, isManualAuthActive }) {
+  if (method !== 'POST' || typeof manualAuthOrigin !== 'string' || typeof isManualAuthActive !== 'function' || !isManualAuthActive()) return false
+  let target
+  let loginOrigin
+  try {
+    target = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
+    loginOrigin = normalizeAllowedOrigin(manualAuthOrigin)
+  } catch {
+    return false
+  }
+  if (!originAllowed(target, new Set([loginOrigin]))) return false
+  if (!(manualAuthPaths instanceof Set) || !manualAuthPaths.has(target.pathname)) return false
+  return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
+}
+
+/** Permit a write only during its approved form-submit action and only to that form's exact primary-origin path. */
+export function isApprovedWritePostAllowed({ method, targetUrl, contentType, authorization }) {
+  if (method !== 'POST' || !authorization || !['create', 'update', 'delete'].includes(authorization.operation)) return false
+  let target
+  let approvedOrigin
+  try {
+    target = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
+    approvedOrigin = normalizeAllowedOrigin(authorization.origin)
+  } catch {
+    return false
+  }
+  if (!originAllowed(target, new Set([approvedOrigin])) || target.pathname !== authorization.path) return false
+  return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
+}
+
+function originAllowed(url, origins) {
+  try { return origins.has(normalizeAllowedOrigin(url.origin)) } catch { return false }
+}
+
+function safeAuditUrl(raw) {
+  try {
+    const url = new URL(raw)
+    return { hostname: url.hostname.toLowerCase().replace(/\.$/, ''), port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)) }
+  } catch { return { hostname: null, port: null } }
+}
+
 /**
  * Resolves a hostname via DNS and strictly validates ALL returned IP addresses.
  * If ANY returned IP is non-public or prohibited, the resolution is rejected.
@@ -238,7 +299,7 @@ export function isHostInScope(targetHost, allowedBaseHost) {
  * @returns {Promise<{ hostname: string, pinnedIp: string, allIps: string[] }>}
  */
 export async function resolveAndValidateHost(hostname, options = {}) {
-  const host = hostname.trim().toLowerCase()
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '')
 
   if (isBlockedHostname(host)) {
     throw new Error(`Access to blocked host "${host}" is prohibited by security policy.`)
@@ -283,6 +344,21 @@ export async function resolveAndValidateHost(hostname, options = {}) {
   }
 }
 
+function classifyDestinationError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  if (message.includes('dns resolution failed') || message.includes('no addresses')) return 'DNS_VALIDATION_FAILED'
+  if (message.includes('blocked host')) return 'BLOCKED_HOSTNAME'
+  if (message.includes('prohibited ip') || message.includes('prohibited range') || message.includes('dns answer')) return 'PRIVATE_IP_BLOCKED'
+  return 'DNS_VALIDATION_FAILED'
+}
+
+function safeDestinationFailureReason(outcome) {
+  if (outcome === 'DNS_VALIDATION_FAILED') return 'DNS resolution failed or returned no usable addresses.'
+  if (outcome === 'BLOCKED_HOSTNAME') return 'Destination hostname is prohibited by the outbound security policy.'
+  if (outcome === 'PRIVATE_IP_BLOCKED') return 'A resolved destination address is in a prohibited network range.'
+  return 'Destination validation failed.'
+}
+
 /**
  * Creates an egress security proxy instance that enforces strict destination and IP policies.
  *
@@ -300,15 +376,30 @@ export async function resolveAndValidateHost(hostname, options = {}) {
 export async function createSecurityProxy(config) {
   const {
     allowedHost,
+    primaryOrigin = `https://${allowedHost}`,
+    resourceOrigins = [],
+    navigationOrigins = [],
     connectTimeoutMs = 8000,
     dnsLookup,
     onSecurityViolation,
     testTargetIp,
     testTargetPort,
+    manualAuthOrigin,
+    manualAuthPaths,
+    isManualAuthActive = () => false,
+    isApprovedWriteRequest = () => false,
   } = config
 
   if (!allowedHost) {
     throw new Error('allowedHost is required to start a security proxy.')
+  }
+
+  const allowedResourceOrigins = new Set([normalizeAllowedOrigin(primaryOrigin), ...resourceOrigins.map(normalizeAllowedOrigin)])
+  const allowedNavigation = new Set([normalizeAllowedOrigin(primaryOrigin), ...navigationOrigins.map(normalizeAllowedOrigin)])
+  const allowedEgressOrigins = new Set([...allowedResourceOrigins, ...allowedNavigation])
+  const audit = (type, url, details = {}) => {
+    const safe = safeAuditUrl(url)
+    onSecurityViolation?.({ type, ...safe, ...details })
   }
 
   const activeSockets = new Set()
@@ -319,20 +410,35 @@ export async function createSecurityProxy(config) {
     try {
       targetUrl = new URL(req.url)
     } catch {
-      onSecurityViolation?.({ type: 'MALFORMED_URL', url: req.url })
+      audit('DNS_VALIDATION_FAILED', req.url, { reason: 'Malformed destination URL', category: 'unknown' })
       res.writeHead(400, { 'content-type': 'text/plain' })
       return res.end('Bad Request: Malformed destination URL.')
     }
 
+    const manualLoginPost = isManualLoginPostAllowed({
+      method: req.method,
+      targetUrl,
+      contentType: req.headers['content-type'],
+      manualAuthOrigin,
+      manualAuthPaths,
+      isManualAuthActive,
+    })
+    const approvedWritePost = isApprovedWriteRequest({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !manualLoginPost && !approvedWritePost) {
+      audit('OUT_OF_SCOPE', targetUrl.href, { category: 'unknown', reason: 'Read-only policy blocks non-GET/HEAD requests.' })
+      res.writeHead(403, { 'content-type': 'text/plain' })
+      return res.end('Forbidden by read-only policy.')
+    }
+
     const targetPort = targetUrl.port ? Number(targetUrl.port) : (targetUrl.protocol === 'https:' ? 443 : 80)
     if (targetPort !== 80 && targetPort !== 443) {
-      onSecurityViolation?.({ type: 'PROHIBITED_PORT', port: targetPort, url: req.url })
+      audit('PORT_BLOCKED', targetUrl.href, { category: 'unknown' })
       res.writeHead(403, { 'content-type': 'text/plain' })
       return res.end(`Forbidden: Port ${targetPort} is prohibited. Only standard web ports (80, 443) are allowed.`)
     }
 
-    if (!isHostInScope(targetUrl.hostname, allowedHost)) {
-      onSecurityViolation?.({ type: 'OUT_OF_SCOPE', hostname: targetUrl.hostname, allowedHost })
+    if (!originAllowed(targetUrl, allowedEgressOrigins)) {
+      audit('OUT_OF_SCOPE', targetUrl.href, { category: 'unknown', explicitResourceEntryNeeded: true })
       res.writeHead(403, { 'content-type': 'text/plain' })
       return res.end(`Forbidden: Host "${targetUrl.hostname}" is out of registered scope for "${allowedHost}".`)
     }
@@ -360,6 +466,7 @@ export async function createSecurityProxy(config) {
         })
 
         proxyReq.on('error', (err) => {
+          audit('PROXY_FAILURE', targetUrl.href, { category: 'unknown', reason: 'Pinned destination connection failed.' })
           if (!res.headersSent) {
             res.writeHead(502, { 'content-type': 'text/plain' })
             res.end(`Bad Gateway: ${err.message}`)
@@ -369,7 +476,8 @@ export async function createSecurityProxy(config) {
         req.pipe(proxyReq)
       })
       .catch((err) => {
-        onSecurityViolation?.({ type: 'DNS_SECURITY_BLOCK', error: err.message, host: targetUrl.hostname })
+        const outcome = classifyDestinationError(err)
+        audit(outcome, targetUrl.href, { stage: outcome === 'DNS_VALIDATION_FAILED' ? 'dns_validation' : 'destination_validation', category: 'unknown', reason: safeDestinationFailureReason(outcome) })
         res.writeHead(403, { 'content-type': 'text/plain' })
         res.end(`Forbidden: ${err.message}`)
       })
@@ -386,19 +494,20 @@ export async function createSecurityProxy(config) {
     activeSockets.add(clientSocket)
     clientSocket.once('close', () => activeSockets.delete(clientSocket))
 
-    const [rawHost, rawPort] = req.url.split(':')
-    const targetHost = rawHost?.trim()
-    const targetPort = Number(rawPort || 443)
+    let connectUrl
+    try { connectUrl = new URL(`https://${req.url}`) } catch { clientSocket.write('HTTP/1.1 400 Bad Request\r\n\r\n'); clientSocket.destroy(); return }
+    const targetHost = connectUrl.hostname.trim()
+    const targetPort = Number(connectUrl.port || 443)
 
     if (targetPort !== 443 && targetPort !== 80) {
-      onSecurityViolation?.({ type: 'PROHIBITED_PORT', port: targetPort, targetHost })
+      audit('PORT_BLOCKED', `https://${targetHost}:${targetPort}`)
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       clientSocket.destroy()
       return
     }
 
-    if (!isHostInScope(targetHost, allowedHost)) {
-      onSecurityViolation?.({ type: 'OUT_OF_SCOPE', targetHost, allowedHost })
+    if (!originAllowed(new URL(`https://${targetHost}:${targetPort}`), allowedEgressOrigins)) {
+      audit('OUT_OF_SCOPE', `https://${targetHost}:${targetPort}`, { category: 'unknown', explicitResourceEntryNeeded: true })
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       clientSocket.destroy()
       return
@@ -431,6 +540,7 @@ export async function createSecurityProxy(config) {
         })
 
         targetSocket.on('error', () => {
+          audit('PROXY_FAILURE', `https://${targetHost}:${targetPort}`, { category: 'unknown', reason: 'Pinned destination connection failed.' })
           clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n')
           clientSocket.destroy()
         })
@@ -440,7 +550,8 @@ export async function createSecurityProxy(config) {
         })
       })
       .catch((err) => {
-        onSecurityViolation?.({ type: 'CONNECT_SECURITY_BLOCK', error: err.message, targetHost })
+        const outcome = classifyDestinationError(err)
+        audit(outcome, `https://${targetHost}:${targetPort}`, { stage: outcome === 'DNS_VALIDATION_FAILED' ? 'dns_validation' : 'destination_validation', category: 'unknown', reason: safeDestinationFailureReason(outcome) })
         clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
         clientSocket.destroy()
       })
@@ -459,6 +570,9 @@ export async function createSecurityProxy(config) {
     port,
     proxyUrl,
     allowedHost,
+    primaryOrigin,
+    allowedResourceOrigins: [...allowedResourceOrigins],
+    allowedNavigationOrigins: [...allowedNavigation],
     close: async () => {
       for (const socket of activeSockets) {
         try {

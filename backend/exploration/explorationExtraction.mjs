@@ -10,7 +10,21 @@ export async function extractPageData(page, targetUrl) {
 
   const rawData = await page.evaluate((origin) => {
     // Helper to safely truncate strings
-    const truncate = (str, max) => (typeof str === 'string' ? str.trim().slice(0, max) : '')
+    const truncate = (str, max) => (typeof str === 'string'
+      ? str.trim()
+        .replace(/\b(bearer)\s+[A-Za-z0-9._~+/-]+=*/gi, '$1 [redacted]')
+        .replace(/\b(password|passwd|pwd|access_token|refresh_token|token|secret|api[_-]?key|session(?:id)?|cookie)\s*[:=]\s*[^\s&;,]+/gi, '$1=[redacted]')
+        .slice(0, max)
+      : '')
+    const safeUrl = (value) => {
+      const url = new URL(value, document.baseURI)
+      url.username = ''
+      url.password = ''
+      for (const key of [...url.searchParams.keys()]) {
+        if (/password|passwd|pwd|token|secret|session|cookie|auth|code|signature|key/i.test(key)) url.searchParams.set(key, '[redacted]')
+      }
+      return url.href
+    }
 
     // 1. Page title
     const title = truncate(document.title, 200)
@@ -48,8 +62,7 @@ export async function extractPageData(page, targetUrl) {
         const parsed = new URL(href, document.baseURI)
         // Only accept http / https links
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue
-        fullHref = parsed.origin + parsed.pathname
-        if (parsed.search) fullHref += parsed.search
+        fullHref = safeUrl(parsed.href)
         isSameOrigin = parsed.origin === origin
       } catch {
         continue
@@ -93,7 +106,7 @@ export async function extractPageData(page, targetUrl) {
       }
 
       forms.push({
-        action: truncate(form.getAttribute('action'), 200) || null,
+        action: (() => { try { const raw = form.getAttribute('action'); if (!raw) return null; const safe = new URL(safeUrl(new URL(raw, document.baseURI).href)); return raw.startsWith('/') ? `${safe.pathname}${safe.search}${safe.hash}`.slice(0, 200) : safe.href.slice(0, 200) } catch { return null } })(),
         method: (form.getAttribute('method') || 'GET').toUpperCase(),
         fieldCount: inputs.length,
         fields,
@@ -146,4 +159,17 @@ export async function extractPageData(page, targetUrl) {
     interactiveElements: rawData.interactiveElements,
     authDetected: rawData.isAuthRequired,
   }
+}
+
+/** Removes authentication material from URLs before they enter results or audit history. */
+export function sanitizeExplorationUrl(value) {
+  try {
+    const url = new URL(value)
+    url.username = ''
+    url.password = ''
+    for (const key of [...url.searchParams.keys()]) {
+      if (/password|passwd|pwd|token|secret|session|cookie|auth|code|signature|key/i.test(key)) url.searchParams.set(key, '[redacted]')
+    }
+    return url.href
+  } catch { return '[unavailable-url]' }
 }

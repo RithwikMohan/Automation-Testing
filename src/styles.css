@@ -700,6 +700,7 @@
 .exploration-badge-auth { background: #78350f40; color: #fbbf24; border: 1px solid #d9770666; }
 .exploration-badge-blocked { background: #7f1d1d40; color: #f87171; border: 1px solid #dc262666; }
 .exploration-badge-timeout { background: #37415140; color: #9ca3af; border: 1px solid #4b556366; }
+.exploration-badge-partial { background: #78350f40; color: #fbbf24; border: 1px solid #d9770666; }
 
 .exploration-details-group {
   margin-bottom: 20px;
@@ -760,5 +761,37 @@
   margin-top: 24px;
   padding-top: 18px;
   border-top: 1px solid #1e2a42;
+}
+
+.browser-tests-page { gap: 20px; }
+.browser-test-import-controls { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 14px; margin: 16px 0; }
+.browser-test-import-controls label { display: flex; flex-direction: column; gap: 7px; color: #a7b3c7; font-size: 12px; }
+.browser-test-import-controls input, .browser-test-import-controls select { min-width: 0; padding: 10px 12px; border: 1px solid #28354d; border-radius: 8px; background: #0b1120; color: #e5edf9; }
+.browser-test-file input { padding: 7px; }
+.browser-test-help { padding: 12px 14px; border: 1px solid #1c2940; border-radius: 8px; color: #9aa9bf; background: #0b1120; font-size: 12px; line-height: 1.7; }
+.browser-test-preview-title { display: flex; justify-content: space-between; gap: 12px; margin: 18px 0 10px; color: #cbd5e1; font-size: 13px; }
+.browser-test-errors { margin: 14px 0 0; padding: 12px 12px 12px 32px; border: 1px solid #7f1d1d; border-radius: 8px; color: #fecaca; background: #450a0a33; font-size: 12px; line-height: 1.6; }
+.browser-test-message { margin-bottom: 0; }
+.browser-test-columns { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(360px, 1.2fr); gap: 18px; }
+.browser-test-suite-list, .browser-test-run-list { display: flex; flex-direction: column; gap: 7px; max-height: 380px; overflow: auto; }
+.browser-test-suite, .browser-test-run { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #202d43; border-radius: 9px; color: #dbe6f5; background: #0b1120; text-align: left; cursor: pointer; }
+.browser-test-suite:hover, .browser-test-run:hover, .browser-test-suite.selected { border-color: #3b82f6; background: #101d34; }
+.browser-test-suite span, .browser-test-run span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.browser-test-suite small, .browser-test-run small, .browser-test-subtitle { display: block; margin-top: 5px; color: #8593a8; font-size: 11px; }
+.browser-test-cases, .browser-test-execution-detail, .browser-test-reference { overflow: hidden; }
+.browser-test-plan { margin: 0; padding-left: 20px; color: #b9c6d8; font-size: 11px; line-height: 1.6; }
+.browser-test-reference pre { overflow: auto; padding: 16px; border: 1px solid #22304a; border-radius: 8px; color: #b9f6e2; background: #080e19; font-size: 12px; line-height: 1.7; }
+.browser-test-reference p { color: #95a3b8; font-size: 12px; line-height: 1.6; }
+.browser-test-artifacts, .browser-test-approval-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+.browser-test-auth-prompt { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px; border: 1px solid #0369a1; border-radius: 9px; color: #c6efff; background: #082f493d; }
+.browser-test-auth-prompt span { flex: 1 1 100%; color: #9bcce0; font-size: 12px; }
+.browser-test-approval-backdrop { z-index: 1000; }
+.browser-test-approval { width: min(620px, calc(100vw - 32px)); padding: 24px; }
+.browser-test-approval p { color: #aab8ca; font-size: 13px; line-height: 1.6; }
+.browser-test-approve-check { display: flex; align-items: center; gap: 9px; margin-top: 18px; color: #dbe6f5; font-size: 13px; }
+.browser-test-approve-check input { accent-color: #3b82f6; }
+@media (max-width: 900px) {
+  .browser-test-columns { grid-template-columns: 1fr; }
+  .browser-test-import-controls { grid-template-columns: 1fr; }
 }
 

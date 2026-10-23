@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { URL } from 'node:url'
 import { chromium } from 'playwright'
-import { createSecurityProxy, isHostInScope } from './networkSecurity.mjs'
+import { createSecurityProxy, normalizeAllowedOrigin } from './networkSecurity.mjs'
 import { validateExplorationPayload } from './explorationValidation.mjs'
-import { extractPageData } from './explorationExtraction.mjs'
+import { extractPageData, sanitizeExplorationUrl } from './explorationExtraction.mjs'
 import {
   getApplicationById,
   persistExplorationResult,
@@ -12,15 +12,41 @@ import {
 /** Maps browser navigation errors to fail-closed exploration statuses. */
 export function classifyNavigationError(error) {
   const lower = String(error?.message || error || '').toLowerCase()
-  if (
-    lower.includes('err_tunnel_connection_failed') ||
-    lower.includes('err_proxy_connection_failed') ||
-    lower.includes('403') ||
-    lower.includes('blockedbyclient') ||
-    lower.includes('err_blocked_by_client')
-  ) return 'SECURITY_BLOCKED'
+  if (lower.includes('blockedbyclient') || lower.includes('err_blocked_by_client')) return 'SECURITY_BLOCKED'
+  if (lower.includes('err_tunnel_connection_failed') || lower.includes('err_proxy_connection_failed')) return 'FAILED'
+  if (/\b403\b/.test(lower)) return 'FAILED'
   if (lower.includes('timeout') || lower.includes('timed out')) return 'TIMEOUT'
   return null
+}
+
+export function classifyNetworkFailure(error, phase = 'navigation') {
+  if (phase === 'proxy-startup') return 'PROXY_FAILURE'
+  const message = String(error?.message || error || '').toLowerCase()
+  if (message.includes('err_cert') || message.includes('certificate')) return 'TLS_VALIDATION_FAILED'
+  if (message.includes('proxy') || message.includes('tunnel')) return 'PROXY_FAILURE'
+  if (message.includes('enotfound') || message.includes('eai_again') || message.includes('dns')) return 'DNS_VALIDATION_FAILED'
+  if (message.includes('connection refused') || message.includes('econnrefused') || message.includes('econnreset') || message.includes('socket hang up')) return 'PROXY_FAILURE'
+  return 'DNS_VALIDATION_FAILED'
+}
+
+function diagnosticDetails(outcome, stage, category, topLevelNavigation, explanation, hostname = null, port = null) {
+  const reasonCode = outcome
+  const recommendedAction = outcome === 'OUT_OF_SCOPE' || outcome === 'REDIRECT_BLOCKED'
+    ? 'Review this application’s navigation and resource origin approvals; approve only origins required by the application.'
+    : outcome === 'PRIVATE_IP_BLOCKED'
+      ? 'Use a public destination; private and reserved address ranges are intentionally denied.'
+      : outcome === 'DNS_VALIDATION_FAILED'
+        ? 'Check the hostname DNS records and retry after DNS is healthy.'
+        : outcome === 'TLS_VALIDATION_FAILED'
+          ? 'Check the destination certificate chain and hostname; certificate validation remains enabled.'
+          : outcome === 'PORT_BLOCKED'
+            ? 'Use HTTP port 80 or HTTPS port 443.'
+            : outcome === 'PROXY_FAILURE'
+              ? 'Check outbound connectivity from the Chronos host to the validated destination.'
+              : outcome === 'REMOTE_HTTP_ERROR'
+                ? 'Check whether the destination permits read-only requests from this network and user agent.'
+              : 'Review the read-only request policy and the recorded request category.'
+  return { stage, reasonCode, hostname, port, category, topLevelNavigation, explanation, recommendedAction }
 }
 
 /**
@@ -39,7 +65,19 @@ export function classifyNavigationError(error) {
 export async function runExploration(params, options = {}) {
   const startTime = Date.now()
   const explorationId = `exp-${randomUUID()}`
-  const warnings = []
+  const auditEvents = []
+  let allowedResourceCount = 0
+  let blockedResourceCount = 0
+  const getAuditEvents = () => [...new Map(auditEvents.map((event) => {
+    const stage = event.stage || ({ OUT_OF_SCOPE: 'origin_policy', REDIRECT_BLOCKED: 'redirect_policy', PORT_BLOCKED: 'port_policy', PRIVATE_IP_BLOCKED: 'destination_validation', DNS_VALIDATION_FAILED: 'dns_validation', TLS_VALIDATION_FAILED: 'tls_validation', PROXY_FAILURE: 'proxy_connection' }[event.outcome] || 'request_interception')
+    const explanation = event.explanation || event.reason || `Request was denied by the ${stage.replaceAll('_', ' ')}.`
+    const diagnostic = { ...event, ...diagnosticDetails(event.outcome, stage, event.category || 'unknown', event.topLevelNavigation ?? null, explanation, event.hostname || null, event.port || null), reasonCode: event.reasonCode || event.outcome }
+    return [`${diagnostic.outcome}|${diagnostic.hostname}|${diagnostic.port}|${diagnostic.category}|${diagnostic.topLevelNavigation}`, diagnostic]
+  })).values()]
+  const getAuditSummary = (mainDocumentStatus, mainDocumentInspectable) => {
+    const events = getAuditEvents()
+    return { mainDocumentStatus, allowedResources: allowedResourceCount, blockedResources: blockedResourceCount, blockedByReason: auditEvents.reduce((summary, event) => ({ ...summary, [event.outcome]: (summary[event.outcome] || 0) + 1 }), {}), mainDocumentInspectable, partial: mainDocumentInspectable && blockedResourceCount > 0 }
+  }
 
   // 1. Load application from database
   const application = await getApplicationById(params.applicationId)
@@ -65,14 +103,22 @@ export async function runExploration(params, options = {}) {
     // 3. Start dedicated outbound security proxy
     proxy = await createSecurityProxy({
       allowedHost,
+      primaryOrigin: validated.primaryOrigin,
+      resourceOrigins: validated.resourceOrigins,
+      navigationOrigins: validated.navigationOrigins,
       connectTimeoutMs: Math.min(timeoutMs, 8000),
       dnsLookup: options.dnsLookup,
       testTargetIp: options.testTargetIp,
       testTargetPort: options.testTargetPort,
       onSecurityViolation: (violation) => {
-        warnings.push(`Network security boundary blocked access: ${violation.type} (${violation.host || violation.targetHost || violation.url || violation.error || ''})`)
+        blockedResourceCount++
+        const mainHost = (() => { try { return new URL(targetUrl).hostname.toLowerCase().replace(/\.$/, '') } catch { return null } })()
+        const violationHost = String(violation.hostname || '').toLowerCase().replace(/\.$/, '')
+        const isMainDocument = violation.category === 'navigation' || (!violation.category || violation.category === 'unknown') && violationHost === mainHost
+        const event = { outcome: violation.type || 'OUT_OF_SCOPE', hostname: violation.hostname || null, port: violation.port || null, category: isMainDocument ? 'document' : violation.category || 'unknown', topLevelNavigation: isMainDocument, stage: violation.stage, reason: violation.reason || undefined, explanation: violation.reason || undefined, explicitResourceEntryNeeded: violation.explicitResourceEntryNeeded || false }
+        if (!auditEvents.some((item) => JSON.stringify(item) === JSON.stringify(event))) auditEvents.push(event)
       },
-    })
+    }).catch(() => { throw new Error('Outbound proxy startup failed.') })
 
     // 4. Launch Chromium configured with proxy
     browser = await chromium.launch({
@@ -80,12 +126,18 @@ export async function runExploration(params, options = {}) {
       headless: true,
       proxy: {
         server: proxy.proxyUrl,
+        bypass: '<-loopback>',
       },
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--disable-quic',
+        '--dns-prefetch-disable',
+        '--disable-background-networking',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        '--proxy-bypass-list=<-loopback>',
         `--proxy-server=${proxy.proxyUrl}`,
       ],
     })
@@ -93,6 +145,7 @@ export async function runExploration(params, options = {}) {
     // 5. Create isolated browser context with TLS certificate validation enabled
     context = await browser.newContext({
       ignoreHTTPSErrors: false,
+      serviceWorkers: 'block',
       viewport: { width: 1280, height: 800 },
       userAgent: 'Chronos-Security-Audit/2.1 (Read-Only Exploration Engine)',
     })
@@ -102,7 +155,7 @@ export async function runExploration(params, options = {}) {
     page.setDefaultNavigationTimeout(timeoutMs)
 
     // 6. Network request interception for secondary defense and redirect detection
-    await page.route('**', async (route) => {
+    await context.route('**', async (route) => {
       const request = route.request()
       const reqUrlStr = request.url()
 
@@ -110,21 +163,51 @@ export async function runExploration(params, options = {}) {
       try {
         parsed = new URL(reqUrlStr)
       } catch {
-        warnings.push(`Blocked request with invalid URL: ${reqUrlStr.slice(0, 80)}`)
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: null, port: null, category: request.resourceType(), topLevelNavigation: request.isNavigationRequest(), reason: 'Malformed request URL.' })
         return route.abort('blockedbyclient')
       }
 
       // Protocol enforcement
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        warnings.push(`Blocked request with unsupported protocol: ${parsed.protocol}`)
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: null, port: null, category: request.resourceType(), topLevelNavigation: request.isNavigationRequest(), reason: 'Unsupported request protocol.' })
         return route.abort('blockedbyclient')
       }
 
       // Check destination scope: main frame navigation must be within registered scope
-      if (request.isNavigationRequest() && !isHostInScope(parsed.hostname, allowedHost)) {
-        warnings.push(`Blocked out-of-scope navigation to: ${parsed.hostname}`)
+      const permittedNavigationOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.navigationOrigins.map(normalizeAllowedOrigin)])
+      const permittedResourceOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.resourceOrigins.map(normalizeAllowedOrigin)])
+      const isTopNavigation = request.isNavigationRequest() && request.frame() === page.mainFrame()
+      const requestPort = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+      if (requestPort !== 80 && requestPort !== 443) {
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'PORT_BLOCKED', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: request.resourceType(), topLevelNavigation: isTopNavigation, reason: 'Only standard web ports 80 and 443 are permitted.' })
+        if (isTopNavigation && request.redirectedFrom()) auditEvents.push({ outcome: 'REDIRECT_BLOCKED', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: 'document', topLevelNavigation: true, reason: 'Redirect destination uses a prohibited port.' })
         return route.abort('blockedbyclient')
       }
+      let requestOrigin
+      try { requestOrigin = normalizeAllowedOrigin(parsed.origin) } catch {
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: request.resourceType(), topLevelNavigation: isTopNavigation, reason: 'Request origin is invalid or prohibited.' })
+        return route.abort('blockedbyclient')
+      }
+      if (request.method() !== 'GET' && request.method() !== 'HEAD') {
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)), category: request.resourceType(), topLevelNavigation: isTopNavigation, reason: 'Read-only policy blocks non-GET/HEAD requests.' })
+        return route.abort('blockedbyclient')
+      }
+      if (isTopNavigation && !permittedNavigationOrigins.has(requestOrigin)) {
+        blockedResourceCount++
+        auditEvents.push({ outcome: request.redirectedFrom() ? 'REDIRECT_BLOCKED' : 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: request.resourceType(), topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Top-level navigation origin is not approved.' })
+        return route.abort('blockedbyclient')
+      }
+      if (!isTopNavigation && !permittedResourceOrigins.has(requestOrigin)) {
+        blockedResourceCount++
+        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)), category: request.resourceType(), topLevelNavigation: false, explicitResourceEntryNeeded: true, reason: 'Resource origin is not approved.' })
+        return route.abort('blockedbyclient')
+      }
+      allowedResourceCount++
 
       // Continue through proxy
       return route.continue()
@@ -134,15 +217,21 @@ export async function runExploration(params, options = {}) {
     let finalUrl = targetUrl
     page.on('response', (response) => {
       const status = response.status()
-      if (status >= 300 && status < 400 && response.request().isNavigationRequest()) {
+      if (status >= 300 && status < 400 && response.request().isNavigationRequest() && response.request().frame() === page.mainFrame()) {
         const location = response.headers()['location']
         if (location) {
           try {
             const redirectUrl = new URL(location, response.url())
-            if (!isHostInScope(redirectUrl.hostname, allowedHost)) {
-              warnings.push(`Redirect to out-of-scope host "${redirectUrl.hostname}" was detected and prevented.`)
+            const navigationOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.navigationOrigins.map(normalizeAllowedOrigin)])
+            let redirectAllowed = false
+            try { redirectAllowed = navigationOrigins.has(normalizeAllowedOrigin(redirectUrl.origin)) } catch {}
+            if (!redirectAllowed) {
+              const event = { outcome: 'REDIRECT_BLOCKED', hostname: redirectUrl.hostname.toLowerCase().replace(/\.$/, ''), port: Number(redirectUrl.port || (redirectUrl.protocol === 'https:' ? 443 : 80)), category: 'document', topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Redirect destination is not an approved navigation origin.' }
+              if (!auditEvents.some((item) => JSON.stringify(item) === JSON.stringify(event))) auditEvents.push(event)
             }
-          } catch {}
+          } catch {
+            auditEvents.push({ outcome: 'REDIRECT_BLOCKED', hostname: null, port: null, category: 'document', topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Redirect destination could not be validated.' })
+          }
         }
       }
     })
@@ -161,7 +250,7 @@ export async function runExploration(params, options = {}) {
         const result = {
           id: explorationId,
           applicationId: application.id,
-          targetUrl,
+          targetUrl: sanitizeExplorationUrl(targetUrl),
           status: 'SECURITY_BLOCKED',
           title: 'Blocked by Security Policy',
           metaDescription: null,
@@ -170,7 +259,8 @@ export async function runExploration(params, options = {}) {
           forms: [],
           interactiveElements: { buttonCount: 0, linkCount: 0, inputCount: 0, selectCount: 0 },
           authDetected: false,
-          warnings: [...warnings, 'Destination connection was terminated by outbound security boundary.'],
+          warnings: getAuditEvents(),
+          auditSummary: getAuditSummary(null, false),
           durationMs: Date.now() - startTime,
           createdAt: new Date().toISOString(),
         }
@@ -184,7 +274,7 @@ export async function runExploration(params, options = {}) {
         const result = {
           id: explorationId,
           applicationId: application.id,
-          targetUrl,
+          targetUrl: sanitizeExplorationUrl(targetUrl),
           status: 'TIMEOUT',
           title: 'Navigation Timeout',
           metaDescription: null,
@@ -193,7 +283,8 @@ export async function runExploration(params, options = {}) {
           forms: [],
           interactiveElements: { buttonCount: 0, linkCount: 0, inputCount: 0, selectCount: 0 },
           authDetected: false,
-          warnings: [...warnings, 'Navigation exceeded allowed time limit.'],
+          warnings: getAuditEvents(),
+          auditSummary: getAuditSummary(null, false),
           durationMs: Date.now() - startTime,
           createdAt: new Date().toISOString(),
         }
@@ -208,12 +299,12 @@ export async function runExploration(params, options = {}) {
 
     // Check if security proxy returned 403 Forbidden
     if (navResponse && (navResponse.status() === 403 || navResponse.status() === 502)) {
-      const isSecurityBlocked = warnings.some((w) => w.includes('security boundary') || w.includes('Blocked')) || navResponse.status() === 403
+      const isSecurityBlocked = auditEvents.some((event) => event.topLevelNavigation === true) || navResponse.status() === 502 && auditEvents.some((event) => event.outcome === 'PROXY_FAILURE' || event.outcome === 'DNS_VALIDATION_FAILED' || event.outcome === 'PRIVATE_IP_BLOCKED')
       if (isSecurityBlocked) {
         const result = {
           id: explorationId,
           applicationId: application.id,
-          targetUrl,
+          targetUrl: sanitizeExplorationUrl(targetUrl),
           status: 'SECURITY_BLOCKED',
           title: 'Blocked by Security Policy',
           metaDescription: null,
@@ -222,7 +313,8 @@ export async function runExploration(params, options = {}) {
           forms: [],
           interactiveElements: { buttonCount: 0, linkCount: 0, inputCount: 0, selectCount: 0 },
           authDetected: false,
-          warnings: [...warnings, 'Destination connection was rejected by outbound security boundary.'],
+          warnings: getAuditEvents(),
+          auditSummary: getAuditSummary(navResponse?.status() ?? null, false),
           durationMs: Date.now() - startTime,
           createdAt: new Date().toISOString(),
         }
@@ -231,6 +323,12 @@ export async function runExploration(params, options = {}) {
         }
         return result
       }
+    }
+
+    if (navResponse && navResponse.status() >= 400 && !auditEvents.some((event) => event.topLevelNavigation === true)) {
+      const status = navResponse.status()
+      const remotePort = (() => { try { const url = new URL(navResponse.url()); return Number(url.port || (url.protocol === 'https:' ? 443 : 80)) } catch { return null } })()
+      auditEvents.push({ outcome: 'REMOTE_HTTP_ERROR', hostname: (() => { try { return new URL(navResponse.url()).hostname.toLowerCase() } catch { return null } })(), port: remotePort, category: 'document', topLevelNavigation: true, stage: 'remote_response', reasonCode: `HTTP_${status}`, reason: `The destination returned HTTP ${status}; Chronos did not block the request.`, explanation: `The destination returned HTTP ${status}; Chronos did not block the request.` })
     }
 
     // Brief stabilization delay
@@ -242,8 +340,8 @@ export async function runExploration(params, options = {}) {
     const result = {
       id: explorationId,
       applicationId: application.id,
-      targetUrl: finalUrl,
-      status: extracted.status,
+      targetUrl: sanitizeExplorationUrl(finalUrl),
+      status: navResponse?.status() >= 400 ? 'FAILED' : blockedResourceCount > 0 && extracted.status === 'SUCCESS' ? 'PARTIAL' : extracted.status,
       title: extracted.title,
       metaDescription: extracted.metaDescription,
       headings: extracted.headings,
@@ -251,7 +349,8 @@ export async function runExploration(params, options = {}) {
       forms: extracted.forms,
       interactiveElements: extracted.interactiveElements,
       authDetected: extracted.authDetected,
-      warnings,
+      warnings: getAuditEvents(),
+      auditSummary: getAuditSummary(navResponse?.status() ?? null, true),
       durationMs: Date.now() - startTime,
       createdAt: new Date().toISOString(),
     }
@@ -259,7 +358,9 @@ export async function runExploration(params, options = {}) {
     // 9. Persist result
     if (options.persist !== false) {
       await persistExplorationResult(result).catch((err) => {
-        warnings.push(`Result persistence error: ${err.message}`)
+        auditEvents.push({ outcome: 'PROXY_FAILURE', hostname: null, port: null, category: 'audit', topLevelNavigation: false, reason: 'Result persistence failed.' })
+        result.warnings = getAuditEvents()
+        result.auditSummary = getAuditSummary(navResponse?.status() ?? null, true)
       })
     }
 
@@ -273,10 +374,16 @@ export async function runExploration(params, options = {}) {
       lower.includes('out of registered scope') ||
       lower.includes('blocked host')
 
+    if (!auditEvents.length && failureStatus !== 'TIMEOUT') {
+      const outcome = classifyNetworkFailure(err, lower.includes('startup') ? 'proxy-startup' : 'navigation')
+      const reason = outcome === 'PROXY_FAILURE' && lower.includes('startup') ? 'Outbound proxy startup failed.' : outcome === 'PROXY_FAILURE' ? 'Outbound proxy connection failed.' : outcome === 'TLS_VALIDATION_FAILED' ? 'TLS certificate validation failed.' : 'DNS resolution or validation failed.'
+      auditEvents.push({ outcome, hostname: (() => { try { return new URL(targetUrl).hostname.toLowerCase() } catch { return null } })(), port: 443, category: 'document', topLevelNavigation: true, stage: lower.includes('startup') ? 'proxy_startup' : outcome === 'TLS_VALIDATION_FAILED' ? 'tls_validation' : outcome === 'PROXY_FAILURE' ? 'proxy_connection' : 'dns_validation', reason, explanation: reason })
+    }
+
     const result = {
       id: explorationId,
       applicationId: application.id,
-      targetUrl,
+      targetUrl: sanitizeExplorationUrl(targetUrl),
       status: isSecurityError ? 'SECURITY_BLOCKED' : failureStatus === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED',
       title: isSecurityError ? 'Blocked by Security Policy' : 'Exploration Failed',
       metaDescription: null,
@@ -285,7 +392,8 @@ export async function runExploration(params, options = {}) {
       forms: [],
       interactiveElements: { buttonCount: 0, linkCount: 0, inputCount: 0, selectCount: 0 },
       authDetected: false,
-      warnings: [...warnings, isSecurityError ? err.message : 'Exploration encountered an error.'],
+      warnings: getAuditEvents(),
+      auditSummary: getAuditSummary(null, false),
       durationMs: Date.now() - startTime,
       createdAt: new Date().toISOString(),
     }

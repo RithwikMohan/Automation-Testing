@@ -19,6 +19,7 @@ import {
   getAutomationDefinitionById,
   initializeDatabase,
   listApplications,
+  listApplicationOriginAudit,
   listAutomationDefinitions,
   listPersistedRuns,
   persistArtifacts,
@@ -28,9 +29,24 @@ import {
   updateAutomationDefinition,
   listExplorationResults,
   getExplorationResultById,
+  importBrowserTestSuite,
+  listBrowserTestSuites,
+  listBrowserTestCases,
+  findBrowserTestCaseKeys,
+  getBrowserTestCaseById,
+  createBrowserTestExecution,
+  listBrowserTestExecutions,
+  getBrowserTestExecutionById,
+  getBrowserTestArtifactById,
+  interruptOrphanedBrowserTestExecutions,
 } from './database.mjs'
 import { runExploration } from './exploration/explorationRunner.mjs'
 import { generateTaskPlan, PlanningError } from './planning/taskPlanning.mjs'
+import { parseTestCaseCsv } from './browserTests/csvImport.mjs'
+import { compileTestCase } from './browserTests/interpreter.mjs'
+import { cancelBrowserTestExecution, startBrowserTestExecution, waitForBrowserTestLogin } from './browserTests/execution.mjs'
+import { isAuthorizedHrRequest, isRegisteredHcmApp } from './integrations/oracleHcm/hrAccess.mjs'
+import { captureHcmInspection, closeHcmInspection, resumeHcmInspection, startHcmInspection } from './integrations/oracleHcm/inspection.mjs'
 import {
   validateApplicationPayload,
   validateAutomationDefinitionPayload,
@@ -53,16 +69,18 @@ function json(response, status, body) {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'access-control-allow-origin': corsOrigin,
-    'access-control-allow-headers': 'content-type',
+    'access-control-allow-headers': 'content-type, x-chronos-hr-token',
     'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
   })
   response.end(JSON.stringify(body))
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 64 * 1024) {
   let raw = ''
-  for await (const chunk of request) raw += chunk
-  if (raw.length > 64 * 1024) throw new Error('Request body is too large.')
+  for await (const chunk of request) {
+    raw += chunk
+    if (Buffer.byteLength(raw) > maxBytes) throw new Error('Request body is too large.')
+  }
   return JSON.parse(raw)
 }
 
@@ -416,7 +434,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     response.writeHead(204, {
       'access-control-allow-origin': corsOrigin,
-      'access-control-allow-headers': 'content-type',
+      'access-control-allow-headers': 'content-type, x-chronos-hr-token',
       'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
     })
     return response.end()
@@ -513,6 +531,17 @@ const server = createServer(async (request, response) => {
     }
   }
 
+  const appOriginAuditMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/origin-audit$/)
+  if (appOriginAuditMatch && request.method === 'GET') {
+    try {
+      const app = await getApplicationById(appOriginAuditMatch[1])
+      if (!app) return json(response, 404, { error: 'Application not found.' })
+      return json(response, 200, await listApplicationOriginAudit(appOriginAuditMatch[1]))
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
   /* -------------------------------------------------------------------------
      Phase 2.2: Natural-Language Task Planning (review only)
      ------------------------------------------------------------------------- */
@@ -534,6 +563,47 @@ const server = createServer(async (request, response) => {
       const status = error instanceof PlanningError ? error.status : 500
       const message = error instanceof PlanningError ? error.message : 'Task planning failed. Please retry.'
       return json(response, status, { error: message })
+    }
+  }
+
+  /* -------------------------------------------------------------------------
+     Oracle HCM read-only wizard inspection. Sessions remain memory-only.
+     Every route is separately gated by the locally configured HR token.
+     ------------------------------------------------------------------------- */
+  if (pathname.startsWith('/api/oracle-hcm/inspection')) {
+    if (!process.env.CHRONOS_HR_ACCESS_TOKEN || process.env.CHRONOS_HR_ACCESS_TOKEN.length < 32) {
+      return json(response, 503, { error: 'The protected HR inspection feature is not configured.' })
+    }
+    if (!isAuthorizedHrRequest(request.headers['x-chronos-hr-token'], process.env.CHRONOS_HR_ACCESS_TOKEN)) {
+      return json(response, 401, { error: 'HR authorization is required.' })
+    }
+  }
+  if (pathname === '/api/oracle-hcm/inspection' && request.method === 'POST') {
+    try {
+      const body = await readJson(request)
+      const applicationId = requiredString(body.applicationId, 'applicationId')
+      const application = await getApplicationById(applicationId)
+      if (!isRegisteredHcmApp(application)) return json(response, 400, { error: 'Select the active, manually authenticated registered Oracle HCM demo application.' })
+      const inspection = await startHcmInspection(application)
+      return json(response, 201, inspection)
+    } catch {
+      return json(response, 422, { error: 'The protected inspection session could not start. Check the registered origin approvals and browser availability.' })
+    }
+  }
+  const hcmInspectionMatch = pathname.match(/^\/api\/oracle-hcm\/inspection\/([a-f0-9-]+)(?:\/(resume|snapshot|close))?$/i)
+  if (hcmInspectionMatch) {
+    const [, inspectionId, operation] = hcmInspectionMatch
+    if (operation === 'resume' && request.method === 'POST') {
+      const resumed = await resumeHcmInspection(inspectionId)
+      return resumed ? json(response, 200, { state: 'AUTHENTICATED_READ_ONLY' }) : json(response, 409, { error: 'Manual authentication is not confirmed or the current page is outside approved origins.' })
+    }
+    if (operation === 'snapshot' && request.method === 'GET') {
+      const snapshot = await captureHcmInspection(inspectionId)
+      return snapshot ? json(response, 200, snapshot) : json(response, 409, { error: 'Inspection is not authenticated or the page is outside approved origins.' })
+    }
+    if (operation === 'close' && request.method === 'POST') {
+      const closed = await closeHcmInspection(inspectionId)
+      return closed ? json(response, 200, { state: 'CLOSED' }) : json(response, 404, { error: 'Inspection session is unavailable.' })
     }
   }
 
@@ -575,6 +645,175 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       return phase1Error(response, error)
     }
+  }
+
+  /* -------------------------------------------------------------------------
+     Phase 1 Rule-Based Browser Tests
+     ------------------------------------------------------------------------- */
+  const browserTestPreview = pathname === '/api/browser-tests/import/preview'
+  const browserTestImport = pathname === '/api/browser-tests/import'
+  if ((browserTestPreview || browserTestImport) && request.method === 'POST') {
+    try {
+      const body = await readJson(request, 2_200_000)
+      const applicationId = requiredString(body.applicationId, 'applicationId')
+      const application = await getApplicationById(applicationId)
+      if (!application || application.status !== 'Active') return json(response, 404, { error: 'An active registered application is required.' })
+      const parsed = parseTestCaseCsv(body.csvText)
+      const rowErrors = []
+      const existing = await findBrowserTestCaseKeys(applicationId, parsed.rows.map((row) => row.testCaseId).filter(Boolean))
+      const existingKeys = new Set(existing.map((key) => key.toLowerCase()))
+      const compiled = parsed.rows.map((row) => {
+        const errors = [...row.errors]
+        if (existingKeys.has(row.testCaseId.toLowerCase())) errors.push('This test case ID already exists for the selected application.')
+        let plan = null
+        if (!errors.length) {
+          try { plan = compileTestCase(row, application) } catch (error) { errors.push(error.message || 'Test steps could not be interpreted.') }
+        }
+        if (errors.length) rowErrors.push({ rowNumber: row.rowNumber, testCaseId: row.testCaseId || null, errors })
+        return {
+          rowNumber: row.rowNumber,
+          testCaseId: row.testCaseId,
+          name: row.name,
+          priority: row.priority,
+          tags: row.tags,
+          preconditions: row.preconditions,
+          expectedResult: row.expectedResult,
+          testDataKeys: Object.keys(row.testData),
+          stepCount: plan?.actions.length || 0,
+          plan,
+          errors,
+          caseData: row,
+        }
+      })
+      const globalErrors = [...parsed.errors]
+      if (compiled.length === 0) globalErrors.push('CSV must include at least one test case row.')
+      if (browserTestPreview) {
+        return json(response, 200, {
+          valid: globalErrors.length === 0 && rowErrors.length === 0 && compiled.length > 0,
+          rows: compiled.map(({ caseData, ...item }) => item),
+          errors: globalErrors,
+          rowErrors,
+        })
+      }
+      if (globalErrors.length || rowErrors.length || !compiled.length) {
+        return json(response, 422, { error: 'CSV import has validation errors. Fix the preview before importing.', errors: globalErrors, rowErrors })
+      }
+      const safeName = String(body.name || body.filename || 'Imported browser tests').replace(/[^a-zA-Z0-9 ._-]/g, '').trim().slice(0, 120) || 'Imported browser tests'
+      const sourceFilename = String(body.filename || '').split(/[\\/]/).pop().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || null
+      const suiteId = randomUUID()
+      const testCases = compiled.map((item) => ({
+        id: randomUUID(),
+        caseKey: item.caseData.testCaseId,
+        name: item.caseData.name,
+        preconditions: item.caseData.preconditions,
+        plan: item.plan,
+        testData: item.caseData.testData,
+        expectedResult: item.caseData.expectedResult,
+        priority: item.caseData.priority,
+        tags: item.caseData.tags,
+      }))
+      const suite = await importBrowserTestSuite({ id: suiteId, applicationId, name: safeName, sourceFilename, cases: testCases })
+      return json(response, 201, suite)
+    } catch (error) {
+      return phase1Error(response, error)
+    }
+  }
+
+  if (pathname === '/api/browser-tests/suites' && request.method === 'GET') {
+    try { return json(response, 200, await listBrowserTestSuites()) } catch (error) { return phase1Error(response, error) }
+  }
+
+  const browserSuiteCases = pathname.match(/^\/api\/browser-tests\/suites\/([a-zA-Z0-9-]+)\/cases$/)
+  if (browserSuiteCases && request.method === 'GET') {
+    try {
+      const cases = await listBrowserTestCases(browserSuiteCases[1])
+      return json(response, 200, cases.map(({ test_data: testData, ...item }) => ({ ...item, test_data_keys: Object.keys(testData || {}) })))
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  const browserCaseMatch = pathname.match(/^\/api\/browser-tests\/cases\/([a-zA-Z0-9-]+)$/)
+  if (browserCaseMatch && request.method === 'GET') {
+    try {
+      const item = await getBrowserTestCaseById(browserCaseMatch[1])
+      if (!item) return json(response, 404, { error: 'Browser test case not found.' })
+      const { test_data: testData, ...safeCase } = item
+      return json(response, 200, { ...safeCase, test_data_keys: Object.keys(testData || {}) })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  const executeBrowserCase = pathname.match(/^\/api\/browser-tests\/cases\/([a-zA-Z0-9-]+)\/execute$/)
+  if (executeBrowserCase && request.method === 'POST') {
+    try {
+      const item = await getBrowserTestCaseById(executeBrowserCase[1])
+      if (!item) return json(response, 404, { error: 'Browser test case not found.' })
+      if (item.application_status !== 'Active') return json(response, 409, { error: 'The registered application is not active.' })
+      const body = await readJson(request).catch(() => ({}))
+      const requiresApproval = item.plan.actions.some((action) => action.requiresApproval === true)
+      if (requiresApproval && body.approveInteractions !== true) return json(response, 403, { error: 'Explicit approval is required because this test contains interactive actions.' })
+      const execution = await createBrowserTestExecution({
+        id: randomUUID(),
+        suiteId: item.suite_id,
+        caseId: item.id,
+        applicationId: item.application_id,
+        approvedInteractions: body.approveInteractions === true,
+        expectedOutcome: item.expected_result,
+      })
+      startBrowserTestExecution(execution)
+      return json(response, 202, { id: execution.id, status: execution.status, approved_interactions: execution.approved_interactions })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  if (pathname === '/api/browser-tests/executions' && request.method === 'GET') {
+    try { return json(response, 200, await listBrowserTestExecutions(Number(searchParams.get('limit') || 100))) } catch (error) { return phase1Error(response, error) }
+  }
+
+  const browserExecutionMatch = pathname.match(/^\/api\/browser-tests\/executions\/([a-zA-Z0-9-]+)$/)
+  if (browserExecutionMatch && request.method === 'GET') {
+    try {
+      const execution = await getBrowserTestExecutionById(browserExecutionMatch[1])
+      return execution ? json(response, 200, execution) : json(response, 404, { error: 'Browser test execution not found.' })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  const resumeBrowserExecution = pathname.match(/^\/api\/browser-tests\/executions\/([a-zA-Z0-9-]+)\/resume$/)
+  if (resumeBrowserExecution && request.method === 'POST') {
+    const resumed = await waitForBrowserTestLogin(resumeBrowserExecution[1])
+    return resumed ? json(response, 202, { status: 'RUNNING', message: 'Manual login confirmation received.' }) : json(response, 409, { error: 'This execution is not waiting for manual login.' })
+  }
+
+  const cancelBrowserExecution = pathname.match(/^\/api\/browser-tests\/executions\/([a-zA-Z0-9-]+)\/cancel$/)
+  if (cancelBrowserExecution && request.method === 'POST') {
+    try {
+      const execution = await getBrowserTestExecutionById(cancelBrowserExecution[1])
+      if (!execution) return json(response, 404, { error: 'Browser test execution not found.' })
+      if (!['QUEUED', 'RUNNING'].includes(execution.status)) return json(response, 409, { error: 'This execution is no longer active.' })
+      const cancelled = cancelBrowserTestExecution(execution.id)
+      return cancelled ? json(response, 202, { status: 'CANCEL_REQUESTED' }) : json(response, 409, { error: 'The execution is not active in this worker.' })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  const browserTestArtifact = pathname.match(/^\/api\/browser-tests\/artifacts\/([a-zA-Z0-9-]+)$/)
+  if (browserTestArtifact && request.method === 'GET') {
+    try {
+      const artifact = await getBrowserTestArtifactById(browserTestArtifact[1])
+      if (!artifact) return json(response, 404, { error: 'Browser test artifact not found.' })
+      const artifactRoot = resolve(process.env.ARTIFACT_DIR || 'backend/artifacts', 'browser-tests')
+      const filePath = resolve(artifactRoot, ...artifact.relative_path.split('/'))
+      if (!filePath.startsWith(artifactRoot + '\\')) return json(response, 404, { error: 'Browser test artifact not found.' })
+      const content = await readFile(filePath)
+      response.writeHead(200, { 'content-type': artifact.content_type, 'content-length': content.length, 'cache-control': 'no-store', 'access-control-allow-origin': corsOrigin })
+      return response.end(content)
+    } catch (error) { return json(response, 404, { error: 'Browser test artifact is unavailable.' }) }
+  }
+
+  const browserReport = pathname.match(/^\/api\/browser-tests\/executions\/([a-zA-Z0-9-]+)\/report$/)
+  if (browserReport && request.method === 'GET') {
+    try {
+      const execution = await getBrowserTestExecutionById(browserReport[1])
+      if (!execution) return json(response, 404, { error: 'Browser test execution not found.' })
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-disposition': 'attachment; filename="browser-test-' + execution.id + '.json"', 'cache-control': 'no-store', 'access-control-allow-origin': corsOrigin })
+      return response.end(JSON.stringify(execution, null, 2))
+    } catch (error) { return phase1Error(response, error) }
   }
 
   /* -------------------------------------------------------------------------
@@ -759,7 +998,8 @@ const server = createServer(async (request, response) => {
 })
 
 initializeDatabase()
-  .then(() => {
+  .then(async () => {
+    await interruptOrphanedBrowserTestExecutions().catch(() => {})
     server.listen(port, '127.0.0.1', () => {
       console.log(`Chronos automation service listening on http://localhost:${port}`)
       console.log(`Read-only mode: ${readOnly ? 'enabled' : 'disabled by configuration'}`)

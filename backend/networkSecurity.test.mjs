@@ -9,6 +9,9 @@ import {
   isHostInScope,
   resolveAndValidateHost,
   createSecurityProxy,
+  normalizeAllowedOrigin,
+  isManualLoginPostAllowed,
+  isApprovedWritePostAllowed,
 } from './exploration/networkSecurity.mjs'
 
 test('IP parser parses IPv4, IPv6, and IPv4-mapped IPv6 accurately', () => {
@@ -73,6 +76,7 @@ test('IP security classifier identifies prohibited IPv6 ranges and IPv4-mapped I
   assert.equal(isPrivateOrBlockedIp('2606:4700:4700::1111').blocked, false)
   assert.equal(isPrivateOrBlockedIp('2001:4860:4860::8888').blocked, false)
   assert.equal(isPrivateOrBlockedIp('::ffff:8.8.8.8').blocked, false)
+  assert.equal(isPrivateOrBlockedIp('4000::1').blocked, true, 'IPv6 outside global unicast space is prohibited')
 })
 
 test('Hostname security checks block dangerous suffixes and metadata names', () => {
@@ -97,6 +101,13 @@ test('Scope checker permits exact and subdomains while preventing suffix spoofin
   assert.equal(isHostInScope('attacker-example.com', 'example.com'), false)
   assert.equal(isHostInScope('example.com.evil.com', 'example.com'), false)
   assert.equal(isHostInScope('other.com', 'example.com'), false)
+})
+
+test('Origin normalization is case, trailing-dot and IDN consistent and rejects unsafe ports', () => {
+  assert.equal(normalizeAllowedOrigin('HTTPS://ExAmPlE.COM./'), 'https://example.com')
+  assert.equal(normalizeAllowedOrigin('https://bücher.example'), 'https://xn--bcher-kva.example')
+  assert.throws(() => normalizeAllowedOrigin('https://example.com:8443'), /standard web ports/)
+  assert.throws(() => normalizeAllowedOrigin('https://user:pass@example.com'), /only an HTTP or HTTPS origin/)
 })
 
 test('DNS resolution rejects mixed public and prohibited IP responses', async () => {
@@ -132,6 +143,12 @@ test('DNS resolution succeeds for purely public IPs and returns pinned IP', asyn
   assert.equal(result.hostname, 'public.example.com')
   assert.equal(result.pinnedIp, '93.184.216.34')
   assert.equal(result.allIps.length, 2)
+})
+
+test('Public IPv6 literals are normalized and returned as pinnable destinations', async () => {
+  const result = await resolveAndValidateHost('[2606:4700:4700::1111]')
+  assert.equal(result.hostname, '2606:4700:4700::1111')
+  assert.equal(result.pinnedIp, '2606:4700:4700::1111')
 })
 
 test('Outbound security proxy drops requests to prohibited destinations and unapproved hosts', async () => {
@@ -204,4 +221,115 @@ test('Outbound security proxy drops requests to prohibited destinations and unap
     await proxy.close()
     await new Promise((resolve) => prohibitedServer.close(resolve))
   }
+})
+
+test('Outbound proxy allows an explicitly approved exact resource origin without widening the primary host', async () => {
+  const resourceServer = http.createServer((_req, res) => { res.writeHead(200); res.end('resource-ok') })
+  await new Promise((resolve) => resourceServer.listen(0, '127.0.0.1', resolve))
+  const violations = []
+  const proxy = await createSecurityProxy({
+    allowedHost: 'app.example.com',
+    primaryOrigin: 'https://app.example.com',
+    resourceOrigins: ['http://static.example.net'],
+    dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }],
+    testTargetIp: '127.0.0.1',
+    testTargetPort: resourceServer.address().port,
+    onSecurityViolation: (item) => violations.push(item),
+  })
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxy.port, path: 'http://static.example.net/site.css' }, resolve)
+      request.on('error', reject)
+      request.end()
+    })
+    let body = ''
+    for await (const chunk of response) body += chunk
+    assert.equal(response.statusCode, 200)
+    assert.equal(body, 'resource-ok')
+
+    const blocked = await new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxy.port, path: 'http://other.example.net/site.css' }, resolve)
+      request.on('error', reject)
+      request.end()
+    })
+    assert.equal(blocked.statusCode, 403)
+    assert.ok(violations.some((item) => item.type === 'OUT_OF_SCOPE'))
+  } finally {
+    await proxy.close()
+    await new Promise((resolve) => resourceServer.close(resolve))
+  }
+})
+
+test('Manual authentication allows only the active, form-encoded registered login action path', async () => {
+  let hits = 0
+  const loginServer = http.createServer(async (req, res) => {
+    hits += 1
+    for await (const _chunk of req) {}
+    res.writeHead(200)
+    res.end('login-post-ok')
+  })
+  await new Promise((resolve) => loginServer.listen(0, '127.0.0.1', resolve))
+  let loginGateOpen = false
+  const proxy = await createSecurityProxy({
+    allowedHost: 'app.example.com',
+    primaryOrigin: 'http://app.example.com',
+    manualAuthOrigin: 'http://app.example.com',
+    manualAuthPaths: new Set(['/login']),
+    isManualAuthActive: () => loginGateOpen,
+    dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }],
+    testTargetIp: '127.0.0.1',
+    testTargetPort: loginServer.address().port,
+  })
+  const sendPost = (url, contentType = 'application/x-www-form-urlencoded') => new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: proxy.port, method: 'POST', path: url, headers: { 'content-type': contentType } }, resolve)
+    request.on('error', reject)
+    request.end('form=fixture')
+  })
+  try {
+    const closedGate = await sendPost('http://app.example.com/login')
+    assert.equal(closedGate.statusCode, 403)
+    loginGateOpen = true
+    const allowed = await sendPost('http://app.example.com/login')
+    assert.equal(allowed.statusCode, 200)
+    const wrongOrigin = await sendPost('http://other.example.com/login')
+    assert.equal(wrongOrigin.statusCode, 403)
+    const wrongPath = await sendPost('http://app.example.com/other-action')
+    assert.equal(wrongPath.statusCode, 403)
+    const wrongContentType = await sendPost('http://app.example.com/login', 'application/json')
+    assert.equal(wrongContentType.statusCode, 403)
+    assert.equal(hits, 1)
+  } finally {
+    await proxy.close()
+    await new Promise((resolve) => loginServer.close(resolve))
+  }
+})
+
+test('Manual login POST policy accepts an XHR-style request only for the rendered same-origin form action', () => {
+  const paths = new Set(['/ords/wwv_flow.accept'])
+  const active = () => true
+  const common = {
+    method: 'POST',
+    targetUrl: 'https://oracleapex.com/ords/wwv_flow.accept?p=redacted',
+    contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
+    manualAuthOrigin: 'https://oracleapex.com',
+    manualAuthPaths: paths,
+    isManualAuthActive: active,
+  }
+  assert.equal(isManualLoginPostAllowed(common), true)
+  assert.equal(isManualLoginPostAllowed({ ...common, targetUrl: 'https://oracleapex.com/unrelated' }), false)
+  assert.equal(isManualLoginPostAllowed({ ...common, targetUrl: 'https://other.example/ords/wwv_flow.accept' }), false)
+  assert.equal(isManualLoginPostAllowed({ ...common, contentType: 'application/json' }), false)
+  assert.equal(isManualLoginPostAllowed({ ...common, isManualAuthActive: () => false }), false)
+  assert.equal(isManualLoginPostAllowed({ ...common, method: 'PUT' }), false)
+})
+
+test('Approved business writes are limited to the active operation form path and registered origin', () => {
+  const authorization = { operation: 'create', origin: 'https://app.example.test', path: '/records' }
+  const common = { method: 'POST', targetUrl: 'https://app.example.test/records?csrf=redacted', contentType: 'application/x-www-form-urlencoded', authorization }
+  assert.equal(isApprovedWritePostAllowed(common), true)
+  assert.equal(isApprovedWritePostAllowed({ ...common, targetUrl: 'https://app.example.test/other' }), false)
+  assert.equal(isApprovedWritePostAllowed({ ...common, targetUrl: 'https://other.example.test/records' }), false)
+  assert.equal(isApprovedWritePostAllowed({ ...common, contentType: 'application/json' }), false)
+  assert.equal(isApprovedWritePostAllowed({ ...common, method: 'DELETE' }), false)
+  assert.equal(isApprovedWritePostAllowed({ ...common, authorization: { ...authorization, operation: 'arbitrary' } }), false)
 })
