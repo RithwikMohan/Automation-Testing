@@ -1,5 +1,6 @@
 import { URL } from 'node:url'
 import { normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
+import { validateActionPlan } from './actionRegistry.mjs'
 
 const PLAN_VERSION = '1.0'
 const MAX_ACTIONS = 50
@@ -52,6 +53,8 @@ function parseNaturalLocator(phrase, lineNumber) {
   // Natural: "the <name> button" → role=button
   let match = trimmed.match(/^(?:the\s+)?(.+?)\s+button$/i)
   if (match) return { kind: 'role', role: 'button', name: match[1].trim() }
+  match = trimmed.match(/^button\s+named\s+"([^"\n]{1,120})"$/i)
+  if (match) return { kind: 'role', role: 'button', name: match[1] }
 
   // Natural: "the <name> link"
   match = trimmed.match(/^(?:the\s+)?(.+?)\s+link$/i)
@@ -199,6 +202,10 @@ function parseStep(text, lineNumber) {
   match = t.match(/^select\s+(\$\{test_data\.[a-zA-Z][a-zA-Z0-9_]{0,63}\})\s+from\s+(?:the\s+)?(.+?)\s+(?:dropdown|select|list)$/i)
   if (match) return { action: 'select', locator: parseNaturalLocator(match[2] + ' dropdown', lineNumber), dataKey: parseDataReference(match[1], lineNumber), requiresApproval: true }
 
+  // An explicit, non-secret option label can be selected after run approval.
+  match = t.match(/^select\s+"([^"\n]{1,120})"\s+from\s+(?:the\s+)?(.+?)\s+(?:dropdown|select|list)$/i)
+  if (match) return { action: 'select', locator: parseNaturalLocator(match[2] + ' dropdown', lineNumber), optionLabel: match[1], requiresApproval: true }
+
   // Select label="..." with ${test_data.key}
   match = t.match(/^select\s+((?:label|testid)="[^"]{1,160}")\s+with\s+(\$\{test_data\.[a-zA-Z][a-zA-Z0-9_]{0,63}\})$/i)
   if (match) return { action: 'select', locator: parseNaturalLocator(match[1], lineNumber), dataKey: parseDataReference(match[2], lineNumber), requiresApproval: true }
@@ -298,10 +305,6 @@ function normalizeSteps(rawSteps, label, splitSemicolons = false) {
 export function compileTestCase(testCase, application) {
   const appBase = new URL(application.base_url)
   const testData = testCase.testData || {}
-  const permittedNavigation = new Set([
-    normalizeAllowedOrigin(appBase.origin),
-    ...(application.approved_navigation_origins || []).map(normalizeAllowedOrigin),
-  ])
 
   const actionLines = normalizeSteps(testCase.rawSteps, 'Step', true)
   const actions = actionLines.map((line, index) => parseStep(line, index + 1))
@@ -314,14 +317,7 @@ export function compileTestCase(testCase, application) {
     if (action.action === 'navigate') {
       let target
       try { target = new URL(action.target, appBase) } catch { throw new Error('Navigation target "' + action.target + '" is invalid.') }
-      let origin
-      try { origin = normalizeAllowedOrigin(target.origin) } catch { throw new Error('Navigation target has an invalid origin.') }
-      if (!permittedNavigation.has(origin)) {
-        throw new Error(
-          'Navigation target origin "' + target.origin + '" is not approved for this application.\n' +
-          'Add it to the application\'s approved navigation origins first.',
-        )
-      }
+      try { normalizeAllowedOrigin(target.origin) } catch { throw new Error('Navigation target has an invalid origin.') }
       action.url = target.origin + target.pathname
       delete action.target
     }
@@ -330,6 +326,7 @@ export function compileTestCase(testCase, application) {
   // Parse expected result assertions
   const assertionLines = normalizeSteps(testCase.expectedResult, 'Expected result')
   const assertions = assertionLines.map(parseAssertion)
+  if (assertions.length === 0) throw new Error('Expected result must include at least one meaningful assertion.')
 
   const allActions = [...preconditions, ...actions, ...assertions]
   if (!allActions.length) throw new Error('The case must contain at least one supported action or assertion.')
@@ -360,7 +357,7 @@ export function compileTestCase(testCase, application) {
   }
 
   const plan = { version: PLAN_VERSION, actions: allActions, actionLimit: MAX_ACTIONS }
-  return plan
+  return validateActionPlan(plan, testData)
 }
 
 export const TEST_PLAN_VERSION = PLAN_VERSION

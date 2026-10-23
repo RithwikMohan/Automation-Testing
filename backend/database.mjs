@@ -169,6 +169,9 @@ export async function initializeDatabase() {
       status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED')),
       approved_interactions BOOLEAN NOT NULL DEFAULT false,
       expected_outcome TEXT,
+      execution_options JSONB NOT NULL DEFAULT '{}'::jsonb,
+      video_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+      video_error TEXT,
       actual_outcome TEXT,
       policy_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
       diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -181,6 +184,9 @@ export async function initializeDatabase() {
     );
     ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS policy_warnings JSONB NOT NULL DEFAULT '[]'::jsonb;
     ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS execution_options JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS video_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED';
+    ALTER TABLE browser_test_executions ADD COLUMN IF NOT EXISTS video_error TEXT;
     ALTER TABLE browser_test_executions DROP CONSTRAINT IF EXISTS browser_test_executions_status_check;
     ALTER TABLE browser_test_executions ADD CONSTRAINT browser_test_executions_status_check
       CHECK (status IN ('QUEUED', 'RUNNING', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED'));
@@ -955,13 +961,13 @@ export async function getBrowserTestCaseById(id) {
   return result.rows[0] || null
 }
 
-export async function createBrowserTestExecution({ id, suiteId, caseId, applicationId, approvedInteractions, expectedOutcome }) {
+export async function createBrowserTestExecution({ id, suiteId, caseId, applicationId, approvedInteractions, expectedOutcome, executionOptions = {} }) {
   const database = getDatabasePool()
   const result = await database.query(
     `INSERT INTO browser_test_executions
-     (id, suite_id, case_id, application_id, status, approved_interactions, expected_outcome)
-     VALUES ($1, $2, $3, $4, 'QUEUED', $5, $6) RETURNING *`,
-    [id, suiteId, caseId, applicationId, Boolean(approvedInteractions), expectedOutcome],
+     (id, suite_id, case_id, application_id, status, approved_interactions, expected_outcome, execution_options, video_status)
+     VALUES ($1, $2, $3, $4, 'QUEUED', $5, $6, $7, $8) RETURNING *`,
+    [id, suiteId, caseId, applicationId, Boolean(approvedInteractions), expectedOutcome, JSON.stringify(executionOptions), executionOptions.recordVideo === false ? 'NOT_REQUESTED' : 'PENDING'],
   )
   return result.rows[0]
 }
@@ -971,6 +977,7 @@ export async function updateBrowserTestExecution(id, updates) {
   const allowed = {
     status: 'status', actualOutcome: 'actual_outcome', errorCode: 'error_code', errorDetails: 'error_details',
     startedAt: 'started_at', completedAt: 'completed_at', durationMs: 'duration_ms', policyWarnings: 'policy_warnings', diagnostics: 'diagnostics',
+    videoStatus: 'video_status', videoError: 'video_error',
   }
   const fields = []
   const params = [id]

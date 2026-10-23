@@ -94,6 +94,13 @@ export function validateExplorationPayload(payload, application) {
     primaryOrigin: new URL(application.base_url).origin,
     resourceOrigins: application.approved_resource_origins || [],
     navigationOrigins: application.approved_navigation_origins || [],
+    // Internal routing is allowed only for origins explicitly configured on the
+    // registered application; cross-origin public traffic remains DNS validated.
+    internalOrigins: [
+      new URL(application.base_url).origin,
+      ...(application.approved_navigation_origins || []),
+      ...(application.approved_resource_origins || []),
+    ],
     timeoutMs,
   }
 }

@@ -694,13 +694,18 @@ const server = createServer(async (request, response) => {
           rowErrors,
         })
       }
-      if (globalErrors.length || rowErrors.length || !compiled.length) {
+      const requestedCaseIds = Array.isArray(body.selectedCaseIds) ? new Set(body.selectedCaseIds.map((id) => String(id).toLowerCase())) : null
+      const selectedCases = requestedCaseIds
+        ? compiled.filter((item) => requestedCaseIds.has(String(item.testCaseId).toLowerCase()))
+        : compiled
+      const selectedErrors = selectedCases.filter((item) => item.errors.length)
+      if (globalErrors.length || selectedErrors.length || !selectedCases.length) {
         return json(response, 422, { error: 'CSV import has validation errors. Fix the preview before importing.', errors: globalErrors, rowErrors })
       }
       const safeName = String(body.name || body.filename || 'Imported browser tests').replace(/[^a-zA-Z0-9 ._-]/g, '').trim().slice(0, 120) || 'Imported browser tests'
       const sourceFilename = String(body.filename || '').split(/[\\/]/).pop().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || null
       const suiteId = randomUUID()
-      const testCases = compiled.map((item) => ({
+      const testCases = selectedCases.map((item) => ({
         id: randomUUID(),
         caseKey: item.caseData.testCaseId,
         name: item.caseData.name,
@@ -747,6 +752,17 @@ const server = createServer(async (request, response) => {
       if (!item) return json(response, 404, { error: 'Browser test case not found.' })
       if (item.application_status !== 'Active') return json(response, 409, { error: 'The registered application is not active.' })
       const body = await readJson(request).catch(() => ({}))
+      const defaultTimeoutMs = Number(body.defaultTimeoutMs ?? 10_000)
+      if (!Number.isInteger(defaultTimeoutMs) || defaultTimeoutMs < 1_000 || defaultTimeoutMs > 60_000) {
+        return json(response, 400, { error: 'Default timeout must be an integer from 1,000 to 60,000 milliseconds.' })
+      }
+      const executionOptions = {
+        defaultTimeoutMs,
+        recordVideo: body.recordVideo !== false,
+        captureScreenshotsOnFailure: body.captureScreenshotsOnFailure !== false,
+        recordingPolicy: body.recordingPolicy === 'disabled' ? 'disabled' : 'mask-form-values',
+        reuseAuthenticatedSession: body.reuseAuthenticatedSession === true,
+      }
       const requiresApproval = item.plan.actions.some((action) => action.requiresApproval === true)
       if (requiresApproval && body.approveInteractions !== true) return json(response, 403, { error: 'Explicit approval is required because this test contains interactive actions.' })
       const execution = await createBrowserTestExecution({
@@ -756,9 +772,30 @@ const server = createServer(async (request, response) => {
         applicationId: item.application_id,
         approvedInteractions: body.approveInteractions === true,
         expectedOutcome: item.expected_result,
+        executionOptions,
       })
       startBrowserTestExecution(execution)
       return json(response, 202, { id: execution.id, status: execution.status, approved_interactions: execution.approved_interactions })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  const skipBrowserCase = pathname.match(/^\/api\/browser-tests\/cases\/([a-zA-Z0-9-]+)\/skip$/)
+  if (skipBrowserCase && request.method === 'POST') {
+    try {
+      const item = await getBrowserTestCaseById(skipBrowserCase[1])
+      if (!item) return json(response, 404, { error: 'Browser test case not found.' })
+      const body = await readJson(request).catch(() => ({}))
+      const execution = await createBrowserTestExecution({
+        id: randomUUID(), suiteId: item.suite_id, caseId: item.id, applicationId: item.application_id,
+        approvedInteractions: false, expectedOutcome: item.expected_result, executionOptions: { recordVideo: false },
+      })
+      const completedAt = new Date()
+      await updateBrowserTestExecution(execution.id, {
+        status: 'SKIPPED', actualOutcome: String(body.reason || 'Skipped by the selected stop-on-failure policy.').slice(0, 500),
+        errorCode: 'STOP_ON_FAILURE', errorDetails: 'This case was not started because an earlier selected case failed and stop-on-failure is enabled.',
+        completedAt, durationMs: 0, videoStatus: 'NOT_REQUESTED',
+      })
+      return json(response, 201, { id: execution.id, status: 'SKIPPED' })
     } catch (error) { return phase1Error(response, error) }
   }
 

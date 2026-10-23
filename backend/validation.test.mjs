@@ -11,6 +11,18 @@ test('application validation accepts HTTP(S) and rejects unsupported schemes and
   assert.throws(() => validateApplicationPayload({ ...application, baseUrl: 'https://portal.example.test/?access_token=secret' }), /credential or session/)
 })
 
+test('application registration accepts explicitly configured internal HTTP(S) origins', () => {
+  const configured = validateApplicationPayload({
+    ...application,
+    baseUrl: 'https://timesheet.intranet.corp',
+    approvedNavigationOrigins: ['https://sso.intranet.corp'],
+    approvedResourceOrigins: ['https://assets.intranet.corp'],
+  })
+  assert.equal(configured.baseUrl, 'https://timesheet.intranet.corp')
+  assert.deepEqual(configured.approvedNavigationOrigins, ['https://sso.intranet.corp'])
+  assert.deepEqual(configured.approvedResourceOrigins, ['https://assets.intranet.corp'])
+})
+
 test('application validation rejects invalid types and oversized optional fields', () => {
   assert.throws(() => validateApplicationPayload({ ...application, description: 42 }), /Description must be a string/)
   assert.throws(() => validateApplicationPayload({ ...application, notes: 'n'.repeat(1001) }), /1,000 characters/)

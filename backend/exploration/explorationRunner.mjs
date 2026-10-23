@@ -106,6 +106,8 @@ export async function runExploration(params, options = {}) {
       primaryOrigin: validated.primaryOrigin,
       resourceOrigins: validated.resourceOrigins,
       navigationOrigins: validated.navigationOrigins,
+      internalOrigins: validated.internalOrigins,
+      allowPublicOrigins: true,
       connectTimeoutMs: Math.min(timeoutMs, 8000),
       dnsLookup: options.dnsLookup,
       testTargetIp: options.testTargetIp,
@@ -176,8 +178,6 @@ export async function runExploration(params, options = {}) {
       }
 
       // Check destination scope: main frame navigation must be within registered scope
-      const permittedNavigationOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.navigationOrigins.map(normalizeAllowedOrigin)])
-      const permittedResourceOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.resourceOrigins.map(normalizeAllowedOrigin)])
       const isTopNavigation = request.isNavigationRequest() && request.frame() === page.mainFrame()
       const requestPort = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
       if (requestPort !== 80 && requestPort !== 443) {
@@ -186,8 +186,7 @@ export async function runExploration(params, options = {}) {
         if (isTopNavigation && request.redirectedFrom()) auditEvents.push({ outcome: 'REDIRECT_BLOCKED', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: 'document', topLevelNavigation: true, reason: 'Redirect destination uses a prohibited port.' })
         return route.abort('blockedbyclient')
       }
-      let requestOrigin
-      try { requestOrigin = normalizeAllowedOrigin(parsed.origin) } catch {
+      try { normalizeAllowedOrigin(parsed.origin) } catch {
         blockedResourceCount++
         auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: request.resourceType(), topLevelNavigation: isTopNavigation, reason: 'Request origin is invalid or prohibited.' })
         return route.abort('blockedbyclient')
@@ -195,16 +194,6 @@ export async function runExploration(params, options = {}) {
       if (request.method() !== 'GET' && request.method() !== 'HEAD') {
         blockedResourceCount++
         auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)), category: request.resourceType(), topLevelNavigation: isTopNavigation, reason: 'Read-only policy blocks non-GET/HEAD requests.' })
-        return route.abort('blockedbyclient')
-      }
-      if (isTopNavigation && !permittedNavigationOrigins.has(requestOrigin)) {
-        blockedResourceCount++
-        auditEvents.push({ outcome: request.redirectedFrom() ? 'REDIRECT_BLOCKED' : 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: requestPort, category: request.resourceType(), topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Top-level navigation origin is not approved.' })
-        return route.abort('blockedbyclient')
-      }
-      if (!isTopNavigation && !permittedResourceOrigins.has(requestOrigin)) {
-        blockedResourceCount++
-        auditEvents.push({ outcome: 'OUT_OF_SCOPE', hostname: parsed.hostname.toLowerCase().replace(/\.$/, ''), port: Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80)), category: request.resourceType(), topLevelNavigation: false, explicitResourceEntryNeeded: true, reason: 'Resource origin is not approved.' })
         return route.abort('blockedbyclient')
       }
       allowedResourceCount++
@@ -222,13 +211,9 @@ export async function runExploration(params, options = {}) {
         if (location) {
           try {
             const redirectUrl = new URL(location, response.url())
-            const navigationOrigins = new Set([normalizeAllowedOrigin(validated.primaryOrigin), ...validated.navigationOrigins.map(normalizeAllowedOrigin)])
-            let redirectAllowed = false
-            try { redirectAllowed = navigationOrigins.has(normalizeAllowedOrigin(redirectUrl.origin)) } catch {}
-            if (!redirectAllowed) {
-              const event = { outcome: 'REDIRECT_BLOCKED', hostname: redirectUrl.hostname.toLowerCase().replace(/\.$/, ''), port: Number(redirectUrl.port || (redirectUrl.protocol === 'https:' ? 443 : 80)), category: 'document', topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Redirect destination is not an approved navigation origin.' }
-              if (!auditEvents.some((item) => JSON.stringify(item) === JSON.stringify(event))) auditEvents.push(event)
-            }
+            // Cross-origin public redirects are expected for federated sign-in.
+            // The outbound proxy still resolves and rejects private/reserved IPs.
+            if (!['http:', 'https:'].includes(redirectUrl.protocol)) throw new Error('Unsupported redirect protocol.')
           } catch {
             auditEvents.push({ outcome: 'REDIRECT_BLOCKED', hostname: null, port: null, category: 'document', topLevelNavigation: true, explicitResourceEntryNeeded: false, reason: 'Redirect destination could not be validated.' })
           }

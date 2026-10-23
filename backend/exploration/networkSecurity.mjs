@@ -125,6 +125,15 @@ const IPV4_MAPPED_IPV6_MASK = ipv6Cidr('::ffff:0:0/96')
 const IPV4_TRANSLATED_IPV6_MASK = ipv6Cidr('64:ff9b::/96')
 const IPV6_6TO4_MASK = ipv6Cidr('2002::/16')
 const IPV6_GLOBAL_UNICAST = ipv6Cidr('2000::/3')
+const IPV4_RFC1918_RANGES = [ipv4Cidr('10.0.0.0/8'), ipv4Cidr('172.16.0.0/12'), ipv4Cidr('192.168.0.0/16')]
+const IPV6_UNIQUE_LOCAL = ipv6Cidr('fc00::/7')
+
+function isAuthorizedInternalIp(ipString) {
+  const parsed = parseIp(ipString)
+  if (!parsed) return false
+  if (parsed.version === 4) return IPV4_RFC1918_RANGES.some((range) => range.matches(parsed.val))
+  return IPV6_UNIQUE_LOCAL.matches(parsed.val)
+}
 
 /**
  * Checks whether an IP address is private, loopback, link-local, reserved, or prohibited.
@@ -196,11 +205,7 @@ export function isPrivateOrBlockedIp(ipString) {
 const BLOCKED_HOST_PATTERNS = [
   /^localhost$/i,
   /\.localhost$/i,
-  /\.local$/i,
-  /\.internal$/i,
-  /\.lan$/i,
-  /\.home$/i,
-  /\.corp$/i,
+  // Metadata services stay blocked even when an origin is otherwise configured.
   /^metadata\.google\.internal$/i,
   /^instance-data$/i,
   /^metadata\.azure\.com$/i,
@@ -243,23 +248,28 @@ export function normalizeAllowedOrigin(value) {
   if (!['80', '443'].includes(port)) throw new Error('Only standard web ports 80 and 443 can be approved.')
   const hostname = url.hostname.toLowerCase().replace(/\.$/, '')
   if (!hostname || isBlockedHostname(hostname)) throw new Error('This hostname cannot be approved.')
-  if (net.isIP(hostname.replace(/^\[|\]$/g, '')) && isPrivateOrBlockedIp(hostname).blocked) throw new Error('A private or prohibited IP address cannot be approved.')
   return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ''}`
 }
 
 /** Permit only a form POST to a rendered same-origin login action during the manual auth gate. */
-export function isManualLoginPostAllowed({ method, targetUrl, contentType, manualAuthOrigin, manualAuthPaths, isManualAuthActive }) {
+export function isManualLoginPostAllowed({ method, targetUrl, contentType, manualAuthOrigin, manualAuthOrigins, manualAuthPaths, isManualAuthActive }) {
   if (method !== 'POST' || typeof manualAuthOrigin !== 'string' || typeof isManualAuthActive !== 'function' || !isManualAuthActive()) return false
   let target
-  let loginOrigin
   try {
     target = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
-    loginOrigin = normalizeAllowedOrigin(manualAuthOrigin)
   } catch {
     return false
   }
-  if (!originAllowed(target, new Set([loginOrigin]))) return false
-  if (!(manualAuthPaths instanceof Set) || !manualAuthPaths.has(target.pathname)) return false
+  const allowedLoginOrigins = manualAuthOrigins instanceof Set
+    ? new Set([...manualAuthOrigins].map(normalizeAllowedOrigin))
+    : new Set([normalizeAllowedOrigin(manualAuthOrigin)])
+  if (!originAllowed(target, allowedLoginOrigins)) return false
+  const targetOrigin = normalizeAllowedOrigin(target.origin)
+  const pathIsObserved = manualAuthPaths instanceof Set && (
+    manualAuthPaths.has(targetOrigin + target.pathname) ||
+    (!(manualAuthOrigins instanceof Set) && manualAuthPaths.has(target.pathname))
+  )
+  if (!pathIsObserved) return false
   return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
 }
 
@@ -300,6 +310,7 @@ function safeAuditUrl(raw) {
  */
 export async function resolveAndValidateHost(hostname, options = {}) {
   const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  const allowPrivateNetwork = options.allowPrivateNetwork === true
 
   if (isBlockedHostname(host)) {
     throw new Error(`Access to blocked host "${host}" is prohibited by security policy.`)
@@ -308,7 +319,7 @@ export async function resolveAndValidateHost(hostname, options = {}) {
   // If the host is already an IP address string
   if (net.isIP(host)) {
     const ipCheck = isPrivateOrBlockedIp(host)
-    if (ipCheck.blocked) {
+    if (ipCheck.blocked && !(allowPrivateNetwork && isAuthorizedInternalIp(host))) {
       throw new Error(`Direct connection to prohibited IP address (${host}) is denied: ${ipCheck.reason}`)
     }
     return { hostname: host, pinnedIp: ipCheck.canonical, allIps: [ipCheck.canonical] }
@@ -330,7 +341,7 @@ export async function resolveAndValidateHost(hostname, options = {}) {
   for (const entry of addresses) {
     const ip = entry.address
     const check = isPrivateOrBlockedIp(ip)
-    if (check.blocked) {
+    if (check.blocked && !(allowPrivateNetwork && isAuthorizedInternalIp(ip))) {
       throw new Error(`DNS answer for "${host}" returned prohibited IP ${ip}: ${check.reason}`)
     }
     validatedIps.push(check.canonical || ip)
@@ -379,15 +390,18 @@ export async function createSecurityProxy(config) {
     primaryOrigin = `https://${allowedHost}`,
     resourceOrigins = [],
     navigationOrigins = [],
+    internalOrigins = [],
     connectTimeoutMs = 8000,
     dnsLookup,
     onSecurityViolation,
     testTargetIp,
     testTargetPort,
     manualAuthOrigin,
+    manualAuthOrigins,
     manualAuthPaths,
     isManualAuthActive = () => false,
     isApprovedWriteRequest = () => false,
+    allowPublicOrigins = false,
   } = config
 
   if (!allowedHost) {
@@ -397,6 +411,7 @@ export async function createSecurityProxy(config) {
   const allowedResourceOrigins = new Set([normalizeAllowedOrigin(primaryOrigin), ...resourceOrigins.map(normalizeAllowedOrigin)])
   const allowedNavigation = new Set([normalizeAllowedOrigin(primaryOrigin), ...navigationOrigins.map(normalizeAllowedOrigin)])
   const allowedEgressOrigins = new Set([...allowedResourceOrigins, ...allowedNavigation])
+  const allowedInternalOrigins = new Set(internalOrigins.map(normalizeAllowedOrigin))
   const audit = (type, url, details = {}) => {
     const safe = safeAuditUrl(url)
     onSecurityViolation?.({ type, ...safe, ...details })
@@ -420,6 +435,7 @@ export async function createSecurityProxy(config) {
       targetUrl,
       contentType: req.headers['content-type'],
       manualAuthOrigin,
+      manualAuthOrigins,
       manualAuthPaths,
       isManualAuthActive,
     })
@@ -437,13 +453,14 @@ export async function createSecurityProxy(config) {
       return res.end(`Forbidden: Port ${targetPort} is prohibited. Only standard web ports (80, 443) are allowed.`)
     }
 
-    if (!originAllowed(targetUrl, allowedEgressOrigins)) {
+    if (!allowPublicOrigins && !originAllowed(targetUrl, allowedEgressOrigins)) {
       audit('OUT_OF_SCOPE', targetUrl.href, { category: 'unknown', explicitResourceEntryNeeded: true })
       res.writeHead(403, { 'content-type': 'text/plain' })
       return res.end(`Forbidden: Host "${targetUrl.hostname}" is out of registered scope for "${allowedHost}".`)
     }
 
-    resolveAndValidateHost(targetUrl.hostname, { dnsLookup })
+    const allowPrivateNetwork = allowedInternalOrigins.has(normalizeAllowedOrigin(targetUrl.origin))
+    resolveAndValidateHost(targetUrl.hostname, { dnsLookup, allowPrivateNetwork })
       .then(({ pinnedIp }) => {
         const destIp = testTargetIp || pinnedIp
         const destPort = testTargetPort || targetPort
@@ -506,14 +523,15 @@ export async function createSecurityProxy(config) {
       return
     }
 
-    if (!originAllowed(new URL(`https://${targetHost}:${targetPort}`), allowedEgressOrigins)) {
+    if (!allowPublicOrigins && !originAllowed(new URL(`https://${targetHost}:${targetPort}`), allowedEgressOrigins)) {
       audit('OUT_OF_SCOPE', `https://${targetHost}:${targetPort}`, { category: 'unknown', explicitResourceEntryNeeded: true })
       clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       clientSocket.destroy()
       return
     }
 
-    resolveAndValidateHost(targetHost, { dnsLookup })
+    const connectOrigin = normalizeAllowedOrigin(`https://${targetHost}${targetPort === 443 ? '' : ':' + targetPort}`)
+    resolveAndValidateHost(targetHost, { dnsLookup, allowPrivateNetwork: allowedInternalOrigins.has(connectOrigin) })
       .then(({ pinnedIp }) => {
         // Connect directly to the PINNED validated IP address to prevent DNS rebinding
         const destIp = testTargetIp || pinnedIp

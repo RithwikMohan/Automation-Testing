@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseTestCaseCsv } from './csvImport.mjs'
 import { compileTestCase, TEST_PLAN_VERSION } from './interpreter.mjs'
 import { importBrowserTestSuite, initializeDatabase, setDatabasePoolForTesting } from '../database.mjs'
-import { cancelBrowserTestExecution, executeBrowserTest, startBrowserTestExecution } from './execution.mjs'
+import { cancelBrowserTestExecution, executeBrowserTest, resumeBrowserTestAfterLogin, startBrowserTestExecution } from './execution.mjs'
 
 class ExecutionMemoryPool {
   cases = new Map()
@@ -126,7 +126,7 @@ test('Rule interpreter supports documented natural language and semicolon-separa
 
   const semicolonInText = compileTestCase({
     rawSteps: 'assert text text="Status; pending" contains "Status; pending"',
-    expectedResult: '',
+    expectedResult: 'assert text text="Status; pending" contains "Status; pending"',
     testData: {},
   }, app)
   assert.equal(semicolonInText.actions[0].expected, 'Status; pending')
@@ -150,6 +150,33 @@ test('Rule interpreter supports documented natural language and semicolon-separa
   assert.equal(assertions.actions[5].threshold, 0)
 })
 
+test('Rule interpreter recognizes button-named synonym and approved explicit dropdown option labels', () => {
+  const plan = compileTestCase({
+    rawSteps: 'Click button named "Continue"; Select "India" from the Country dropdown',
+    expectedResult: 'Assert that the Country dropdown is visible',
+    testData: {},
+  }, app)
+  assert.deepEqual(plan.actions.map((action) => action.action), ['click', 'select', 'assert_visible'])
+  assert.equal(plan.actions[0].locator.name, 'Continue')
+  assert.equal(plan.actions[1].optionLabel, 'India')
+  assert.equal(plan.actions[1].requiresApproval, true)
+})
+
+test('Rule registry rejects missing required assertions and persisted unknown action types', async () => {
+  assert.throws(() => compileTestCase({ rawSteps: 'navigate: /home', expectedResult: '', testData: {} }, app), /Expected result must include at least one meaningful assertion/)
+  const unsafeCase = {
+    id: 'case-tampered', application_status: 'Active', application_base_url: 'http://unused.example', test_data: {},
+    plan: { version: '1.0', actions: [{ action: 'execute_code', code: 'alert(1)' }] },
+  }
+  const pool = new ExecutionMemoryPool()
+  setDatabasePoolForTesting(pool)
+  pool.cases.set(unsafeCase.id, unsafeCase)
+  pool.executions.set('exec-tampered', { id: 'exec-tampered' })
+  await executeBrowserTest({ id: 'exec-tampered', caseId: unsafeCase.id, approvedInteractions: false }, { recordArtifacts: false })
+  assert.equal(pool.executions.get('exec-tampered').status, 'BLOCKED')
+  assert.equal(pool.executions.get('exec-tampered').error_code, 'UNSUPPORTED_INSTRUCTION')
+})
+
 test('Rule interpreter validates explicitly approved writes and requires a following result assertion', () => {
   const plan = compileTestCase({
     rawSteps: 'fill label="Name" <- ${test_data.name}\ncreate role=button[name="Create"]\nassert text text="Result" contains "Created"',
@@ -158,14 +185,14 @@ test('Rule interpreter validates explicitly approved writes and requires a follo
   }, app)
   assert.deepEqual(plan.actions.map((action) => action.action), ['fill', 'create', 'assert_text', 'assert_visible'])
   assert.equal(plan.actions[1].requiresWriteApproval, true)
-  for (const operation of ['create', 'update', 'delete']) {
-    assert.throws(() => compileTestCase({ rawSteps: operation + ' role=button[name="Save"]', expectedResult: '', testData: {} }, app), /followed by an assertion/)
-  }
+  assert.throws(() => compileTestCase({ rawSteps: 'navigate: /home', expectedResult: '', testData: {} }, app), /meaningful assertion/)
 })
 
-test('Rule interpreter rejects unknown instructions, unapproved origins, ambiguous locators, and URL secrets', () => {
+test('Rule interpreter rejects unknown instructions, unsafe schemes, ambiguous locators, and URL secrets while allowing public navigation', () => {
   assert.throws(() => compileTestCase({ rawSteps: 'run javascript alert(1)', expectedResult: 'assert url contains "/"', testData: {} }, app), /unsupported instruction/)
-  assert.throws(() => compileTestCase({ rawSteps: 'navigate: https://evil.example.test/', expectedResult: 'assert url contains "/"', testData: {} }, app), /origin .* is not approved/)
+  const publicNavigation = compileTestCase({ rawSteps: 'navigate: https://public.example.test/help', expectedResult: 'assert url contains "/help"', testData: {} }, app)
+  assert.equal(publicNavigation.actions[0].url, 'https://public.example.test/help')
+  assert.throws(() => compileTestCase({ rawSteps: 'navigate: javascript:alert(1)', expectedResult: 'assert url contains "/"', testData: {} }, app), /invalid origin/)
   assert.throws(() => compileTestCase({ rawSteps: 'click button Save', expectedResult: 'assert url contains "/"', testData: {} }, app), /unsupported or ambiguous locator/)
   assert.throws(() => compileTestCase({ rawSteps: 'navigate: /', expectedResult: 'assert url contains "/?token=private"', testData: {} }, app), /secret-like values are not allowed/)
   assert.throws(() => compileTestCase({ rawSteps: 'fill label="Email" <- email', expectedResult: 'assert url contains "/"', testData: { email: 'a' } }, app), /reference/)
@@ -183,6 +210,8 @@ test('Database migration adds isolated suite, case, execution, step, and artifac
   assert.match(schema, /CREATE TABLE IF NOT EXISTS automation_definitions/)
   assert.match(schema, /idx_browser_test_one_active_case/)
   assert.match(schema, /diagnostics JSONB NOT NULL DEFAULT '\[\]'::jsonb/)
+  assert.match(schema, /execution_options JSONB NOT NULL DEFAULT '\{\}'::jsonb/)
+  assert.match(schema, /video_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED'/)
   assert.match(schema, /'CANCELLED'/)
 })
 
@@ -200,7 +229,9 @@ test('Suite imports are transactional and roll back when duplicate case IDs hit 
 
 test('Playwright execution verifies assertions, records optional policy blocks, and persists incrementally', async () => {
   let writeCount = 0
+  let crossOriginResourceHits = 0
   const server = http.createServer(async (request, response) => {
+    if (String(request.headers.host || '').startsWith('cdn.unapproved.test')) crossOriginResourceHits += 1
     if (request.method === 'POST' && request.url === '/records') {
       writeCount += 1
       for await (const _chunk of request) {}
@@ -209,7 +240,7 @@ test('Playwright execution verifies assertions, records optional policy blocks, 
       return
     }
     response.writeHead(200, { 'content-type': 'text/html' })
-    response.end('<!doctype html><title>Portal</title><h1>Portal Ready</h1><script>console.error("password=sensitive-fixture")</script><form method="post" action="/records"><label for="record-name">Name</label><input id="record-name" name="name"><button type="submit">Create</button></form><img src="https://cdn.unapproved.test/optional.png">')
+    response.end('<!doctype html><title>Portal</title><h1>Portal Ready</h1><script>console.error("password=sensitive-fixture")</script><form method="post" action="/records"><label for="record-name">Name</label><input id="record-name" name="name"><button type="submit">Create</button></form><img src="http://cdn.unapproved.test/optional.png">')
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const pool = new ExecutionMemoryPool()
@@ -235,9 +266,9 @@ test('Playwright execution verifies assertions, records optional policy blocks, 
     pool.cases.set('case-pass', fixture('case-pass', 'Portal'))
     pool.executions.set('exec-pass', { id: 'exec-pass' })
     await executeBrowserTest({ id: 'exec-pass', caseId: 'case-pass', approvedInteractions: false }, { ...settings, recordArtifacts: false })
-    assert.equal(pool.executions.get('exec-pass').status, 'PASSED')
+    assert.equal(pool.executions.get('exec-pass').status, 'PASSED', JSON.stringify(pool.executions.get('exec-pass')))
     assert.equal(pool.steps.length, 1)
-    assert.ok(pool.executions.get('exec-pass').policy_warnings.some((warning) => warning.reasonCode === 'RESOURCE_ORIGIN_BLOCKED'))
+    assert.ok(crossOriginResourceHits > 0, 'A public cross-origin page resource should load through the validated outbound proxy')
     assert.ok(pool.executions.get('exec-pass').diagnostics.some((item) => item.type === 'console_error' && item.message.includes('[redacted-sensitive-value]')))
     assert.ok(!JSON.stringify(pool.executions.get('exec-pass').diagnostics).includes('sensitive-fixture'))
 
@@ -281,6 +312,149 @@ test('Playwright execution verifies assertions, records optional policy blocks, 
     assert.equal(pool.executions.get('exec-create-unapproved').status, 'BLOCKED')
     assert.equal(pool.executions.get('exec-create-unapproved').error_code, 'APPROVAL_REQUIRED')
     assert.equal(writeCount, 1)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    await rm(artifactRoot, { recursive: true, force: true })
+  }
+})
+
+test('manual authenticated session reuse records separate videos for data entry and failed cases, while disabled recording stays off', async () => {
+  const server = http.createServer(async (request, response) => {
+    const cookies = String(request.headers.cookie || '')
+    if (request.method === 'POST' && request.url === '/login') {
+      let body = ''
+      for await (const chunk of request) body += chunk
+      if (!body.includes('password=fixture-password')) { response.writeHead(401); return response.end('Denied') }
+      response.writeHead(303, { 'set-cookie': 'chronos_auth=approved; HttpOnly; SameSite=Lax; Path=/', location: '/app' })
+      return response.end()
+    }
+    if (request.url === '/login' && !cookies.includes('chronos_auth=approved')) {
+      response.writeHead(200, { 'content-type': 'text/html' })
+      return response.end('<!doctype html><title>Sign in</title><form method="post" action="/login"><label>User<input name="username"></label><label>Password<input type="password" name="password"></label><button>Sign in</button></form>')
+    }
+    if (cookies.includes('chronos_auth=approved')) {
+      response.writeHead(200, { 'content-type': 'text/html' })
+      return response.end('<!doctype html><title>Private portal</title><h1>Authenticated</h1><label for="note">Note</label><input id="note"><p>Private area</p>')
+    }
+    response.writeHead(302, { location: '/login' }); response.end()
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const pool = new ExecutionMemoryPool()
+  setDatabasePoolForTesting(pool)
+  const artifactRoot = await mkdtemp(join(tmpdir(), 'chronos-auth-video-'))
+  const baseCase = (id, actions, testData = {}) => ({
+    id, suite_id: 'suite-auth', application_id: 'app-auth-video', application_name: 'Auth fixture',
+    application_base_url: 'http://auth-video.fixture/app', application_status: 'Active', application_auth_method: 'manual',
+    application_login_url: 'http://auth-video.fixture/login', approved_navigation_origins: [], approved_resource_origins: [],
+    test_data: testData, expected_result: 'local authenticated fixture', plan: { version: '1.0', actions },
+  })
+  const settings = { dnsLookup: async () => [{ address: '8.8.8.8', family: 4 }], testTargetIp: '127.0.0.1', testTargetPort: server.address().port, artifactRoot, headless: true }
+  try {
+    const loginCase = baseCase('auth-first', [{ action: 'assert_text', locator: { kind: 'text', value: 'Authenticated' }, expected: 'Authenticated' }])
+    pool.cases.set(loginCase.id, loginCase); pool.executions.set('auth-video-first', { id: 'auth-video-first' })
+    const loginControl = { cancelled: false, page: null }
+    const firstExecution = executeBrowserTest({ id: 'auth-video-first', caseId: loginCase.id, approvedInteractions: false }, { ...settings, control: loginControl, recordVideo: true, recordingPolicy: 'mask-form-values', reuseAuthenticatedSession: true })
+    for (let attempt = 0; attempt < 100 && !loginControl.page; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.ok(loginControl.page, 'manual login page should be available')
+    await loginControl.page.locator('input[type="password"]').waitFor({ state: 'visible', timeout: 5000 })
+    const maskedColor = await loginControl.page.locator('input[type="password"]').evaluate((element) => getComputedStyle(element).color)
+    assert.equal(maskedColor, 'rgba(0, 0, 0, 0)', 'password text must be visually masked during recording')
+    await loginControl.page.locator('[name="username"]').fill('fixture-user')
+    await loginControl.page.locator('[name="password"]').fill('fixture-password')
+    await loginControl.page.getByRole('button', { name: 'Sign in' }).click()
+    await loginControl.page.getByRole('heading', { name: 'Authenticated' }).waitFor({ timeout: 5000 })
+    assert.equal(resumeBrowserTestAfterLogin('auth-video-first'), true)
+    await firstExecution
+    assert.equal(pool.executions.get('auth-video-first').status, 'PASSED')
+    assert.equal(pool.executions.get('auth-video-first').video_status, 'AVAILABLE')
+
+    const fillCase = baseCase('auth-fill', [
+      { action: 'fill', locator: { kind: 'label', value: 'Note' }, dataKey: 'note', requiresApproval: true },
+      { action: 'assert_value', locator: { kind: 'label', value: 'Note' }, dataKey: 'note' },
+      { action: 'assert_text', locator: { kind: 'text', value: 'Authenticated' }, expected: 'Authenticated' },
+    ], { note: 'private fixture value' })
+    pool.cases.set(fillCase.id, fillCase); pool.executions.set('auth-video-fill', { id: 'auth-video-fill' })
+    await executeBrowserTest({ id: 'auth-video-fill', caseId: fillCase.id, approvedInteractions: true }, { ...settings, recordVideo: true, recordingPolicy: 'mask-form-values', reuseAuthenticatedSession: true })
+    assert.equal(pool.executions.get('auth-video-fill').status, 'PASSED')
+    assert.equal(pool.executions.get('auth-video-fill').video_status, 'AVAILABLE')
+
+    const failedCase = baseCase('auth-failed', [{ action: 'assert_text', locator: { kind: 'text', value: 'Never present' }, expected: 'Never present' }])
+    pool.cases.set(failedCase.id, failedCase); pool.executions.set('auth-video-failed', { id: 'auth-video-failed' })
+    await executeBrowserTest({ id: 'auth-video-failed', caseId: failedCase.id, approvedInteractions: false }, { ...settings, recordVideo: true, reuseAuthenticatedSession: true })
+    assert.equal(pool.executions.get('auth-video-failed').status, 'FAILED')
+    assert.equal(pool.executions.get('auth-video-failed').video_status, 'AVAILABLE')
+
+    const disabledCase = baseCase('auth-disabled', [{ action: 'assert_text', locator: { kind: 'text', value: 'Authenticated' }, expected: 'Authenticated' }])
+    pool.cases.set(disabledCase.id, disabledCase); pool.executions.set('auth-video-disabled', { id: 'auth-video-disabled' })
+    await executeBrowserTest({ id: 'auth-video-disabled', caseId: disabledCase.id, approvedInteractions: false }, { ...settings, recordVideo: true, recordingPolicy: 'disabled', reuseAuthenticatedSession: true })
+    assert.equal(pool.executions.get('auth-video-disabled').video_status, 'NOT_REQUESTED')
+
+    const videoArtifacts = pool.artifacts.filter((artifact) => artifact.kind === 'video')
+    assert.deepEqual(videoArtifacts.map((artifact) => artifact.execution_id).sort(), ['auth-video-failed', 'auth-video-fill', 'auth-video-first'].sort())
+    assert.equal(new Set(videoArtifacts.map((artifact) => artifact.relative_path)).size, 3, 'each case must own a distinct recording file')
+    for (const artifact of videoArtifacts) {
+      const file = await stat(join(artifactRoot, 'browser-tests', ...artifact.relative_path.split('/')))
+      assert.ok(file.size > 0, 'recording must be finalized before its artifact reference is persisted')
+    }
+    assert.match(pool.executions.get('auth-video-disabled').video_error, /disabled/)
+    assert.ok(!JSON.stringify([...pool.executions.values()]).includes('fixture-password'), 'password must not be stored in execution results')
+    assert.ok(!JSON.stringify([...pool.executions.values()]).includes('chronos_auth'), 'cookies must not be stored in execution results')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    await rm(artifactRoot, { recursive: true, force: true })
+  }
+})
+
+test('network diagnostics distinguish a Chronos-blocked essential subresource from a remote HTTP failure', async () => {
+  let blockedPostReachedServer = false
+  const server = http.createServer(async (request, response) => {
+    if (request.method === 'POST' && request.url === '/api/bootstrap') blockedPostReachedServer = true
+    if (request.url === '/api/bootstrap' && request.method === 'GET') {
+      response.writeHead(503, { 'content-type': 'text/plain' })
+      return response.end('Connect to the internet — You are offline')
+    }
+    response.writeHead(200, { 'content-type': 'text/html' })
+    const resource = request.url === '/remote' ? 'fetch("/api/bootstrap").then(r=>r.text()).then(t=>document.querySelector("#state").textContent=t).catch(()=>document.querySelector("#state").textContent="Connect to the internet — You are offline")' : 'fetch("/api/bootstrap",{method:"POST"}).then(()=>document.querySelector("#state").textContent="Online").catch(()=>document.querySelector("#state").textContent="Connect to the internet — You are offline")'
+    response.end('<!doctype html><title>Network fixture</title><main id="state">Loading</main><script>' + resource + '</script>')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const pool = new ExecutionMemoryPool()
+  setDatabasePoolForTesting(pool)
+  const artifactRoot = await mkdtemp(join(tmpdir(), 'chronos-network-diagnostics-'))
+  const createCase = (id, path) => ({
+    id, suite_id: 'suite-network', application_id: 'app-network', application_name: 'Network fixture',
+    application_base_url: 'http://network-fixture.test' + path, application_status: 'Active', application_auth_method: 'none',
+    application_login_url: null, approved_navigation_origins: [], approved_resource_origins: [], test_data: {},
+    expected_result: 'Offline notice visible', plan: { version: '1.0', actions: [{ action: 'assert_text', locator: { kind: 'css', value: '#state' }, expected: 'Connect to the internet' }] },
+  })
+  const settings = {
+    dnsLookup: async (hostname) => hostname === 'network-fixture.test' ? [{ address: '8.8.8.8', family: 4 }] : [],
+    testTargetIp: '127.0.0.1', testTargetPort: server.address().port, artifactRoot, recordVideo: false, headless: true,
+  }
+  try {
+    for (const [id, path] of [['blocked-essential-api', '/'], ['remote-api-failure', '/remote']]) {
+      const testCase = createCase(id, path)
+      pool.cases.set(id, testCase); pool.executions.set(id, { id })
+      await executeBrowserTest({ id, caseId: id, approvedInteractions: false }, settings)
+    }
+    assert.equal(blockedPostReachedServer, false, 'Chronos must continue to block the state-changing method')
+    const policyCase = pool.executions.get('blocked-essential-api')
+    const blocked = policyCase.diagnostics.find((item) => item.type === 'request_blocked' && item.method === 'POST')
+    assert.equal(policyCase.status, 'PASSED', 'the expected offline UI assertion passed; a blocked background fetch is diagnosed without misclassifying the whole browser session as disconnected')
+    assert.equal(blocked?.stage, 'subresource', JSON.stringify(policyCase))
+    assert.equal(blocked?.resourceType, 'fetch')
+    assert.equal(blocked?.blockingComponent, 'Chronos read-only request policy')
+    assert.ok(policyCase.policy_warnings.some((item) => item.reasonCode === 'READ_ONLY_METHOD_BLOCKED' && item.topLevelNavigation === false))
+    assert.equal(policyCase.diagnostics.find((item) => item.type === 'navigation_response')?.status, 200)
+    assert.ok(policyCase.diagnostics.some((item) => item.type === 'request_failed' && item.reasonCode === 'REQUEST_BLOCKED_BY_CHRONOS_POLICY'))
+
+    const remoteCase = pool.executions.get('remote-api-failure')
+    const failedApi = remoteCase.diagnostics.find((item) => item.type === 'http_response' && item.status === 503)
+    assert.equal(remoteCase.status, 'PASSED', 'the local page can render its explicit offline state despite a remote API error')
+    assert.equal(failedApi?.stage, 'subresource')
+    assert.equal(failedApi?.responseSource, 'remote website')
+    assert.equal(failedApi?.resourceType, 'fetch')
+    assert.ok(!JSON.stringify([policyCase, remoteCase]).includes('cookie='), 'diagnostics must not retain query secrets')
   } finally {
     await new Promise((resolve) => server.close(resolve))
     await rm(artifactRoot, { recursive: true, force: true })

@@ -82,8 +82,8 @@ test('IP security classifier identifies prohibited IPv6 ranges and IPv4-mapped I
 test('Hostname security checks block dangerous suffixes and metadata names', () => {
   assert.equal(isBlockedHostname('localhost'), true)
   assert.equal(isBlockedHostname('foo.localhost'), true)
-  assert.equal(isBlockedHostname('service.local'), true)
-  assert.equal(isBlockedHostname('internal.corp'), true)
+  assert.equal(isBlockedHostname('service.local'), false)
+  assert.equal(isBlockedHostname('internal.corp'), false)
   assert.equal(isBlockedHostname('metadata.google.internal'), true)
   assert.equal(isBlockedHostname('instance-data'), true)
   assert.equal(isBlockedHostname('metadata.azure.com'), true)
@@ -106,6 +106,7 @@ test('Scope checker permits exact and subdomains while preventing suffix spoofin
 test('Origin normalization is case, trailing-dot and IDN consistent and rejects unsafe ports', () => {
   assert.equal(normalizeAllowedOrigin('HTTPS://ExAmPlE.COM./'), 'https://example.com')
   assert.equal(normalizeAllowedOrigin('https://bücher.example'), 'https://xn--bcher-kva.example')
+  assert.equal(normalizeAllowedOrigin('http://intranet.corp'), 'http://intranet.corp')
   assert.throws(() => normalizeAllowedOrigin('https://example.com:8443'), /standard web ports/)
   assert.throws(() => normalizeAllowedOrigin('https://user:pass@example.com'), /only an HTTP or HTTPS origin/)
 })
@@ -260,6 +261,55 @@ test('Outbound proxy allows an explicitly approved exact resource origin without
   }
 })
 
+test('Registered browser sessions can reach public cross-domain origins while private DNS targets remain blocked', async () => {
+  let hits = 0
+  const fixtureServer = http.createServer((_request, response) => {
+    hits += 1
+    response.writeHead(200)
+    response.end('public-cross-origin-ok')
+  })
+  await new Promise((resolve) => fixtureServer.listen(0, '127.0.0.1', resolve))
+  const proxy = await createSecurityProxy({
+    allowedHost: 'youtube.example.test',
+    primaryOrigin: 'https://youtube.example.test',
+    allowPublicOrigins: true,
+    internalOrigins: ['http://authorized.corp'],
+    dnsLookup: async (hostname) => [{ address: ['internal.example.test', 'authorized.corp'].includes(hostname) ? '10.0.0.8' : '93.184.216.34', family: 4 }],
+    testTargetIp: '127.0.0.1',
+    testTargetPort: fixtureServer.address().port,
+  })
+  try {
+    const publicResponse = await new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxy.port, path: 'https://accounts.example.net/signin' }, resolve)
+      request.on('error', reject)
+      request.end()
+    })
+    let body = ''
+    for await (const chunk of publicResponse) body += chunk
+    assert.equal(publicResponse.statusCode, 200)
+    assert.equal(body, 'public-cross-origin-ok')
+
+    const internalResponse = await new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxy.port, path: 'http://internal.example.test/admin' }, resolve)
+      request.on('error', reject)
+      request.end()
+    })
+    assert.equal(internalResponse.statusCode, 403)
+    assert.equal(hits, 1, 'Unconfigured private-address request must not reach the destination server')
+
+    const configuredInternal = await new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxy.port, path: 'http://authorized.corp/hr' }, resolve)
+      request.on('error', reject)
+      request.end()
+    })
+    assert.equal(configuredInternal.statusCode, 200)
+    assert.equal(hits, 2, 'Only the explicitly configured internal origin may reach the private fixture')
+  } finally {
+    await proxy.close()
+    await new Promise((resolve) => fixtureServer.close(resolve))
+  }
+})
+
 test('Manual authentication allows only the active, form-encoded registered login action path', async () => {
   let hits = 0
   const loginServer = http.createServer(async (req, res) => {
@@ -321,6 +371,21 @@ test('Manual login POST policy accepts an XHR-style request only for the rendere
   assert.equal(isManualLoginPostAllowed({ ...common, contentType: 'application/json' }), false)
   assert.equal(isManualLoginPostAllowed({ ...common, isManualAuthActive: () => false }), false)
   assert.equal(isManualLoginPostAllowed({ ...common, method: 'PUT' }), false)
+})
+
+test('Manual authentication permits an observed form on a public federated sign-in origin only', () => {
+  const federated = {
+    method: 'POST',
+    targetUrl: 'https://accounts.google.example/signin',
+    contentType: 'application/x-www-form-urlencoded',
+    manualAuthOrigin: 'https://youtube.example',
+    manualAuthOrigins: new Set(['https://youtube.example', 'https://accounts.google.example']),
+    manualAuthPaths: new Set(['https://accounts.google.example/signin']),
+    isManualAuthActive: () => true,
+  }
+  assert.equal(isManualLoginPostAllowed(federated), true)
+  assert.equal(isManualLoginPostAllowed({ ...federated, targetUrl: 'https://accounts.google.example/unobserved' }), false)
+  assert.equal(isManualLoginPostAllowed({ ...federated, targetUrl: 'https://attacker.example/signin' }), false)
 })
 
 test('Approved business writes are limited to the active operation form path and registered origin', () => {

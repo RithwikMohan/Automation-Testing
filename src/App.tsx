@@ -1817,7 +1817,7 @@ function OracleHcmHiringPage() {
 type BrowserTestApp = { id: string; name: string; base_url: string }
 type BrowserTestSuite = { id: string; name: string; application_name: string; case_count: number; created_at: string }
 type BrowserTestCase = { id: string; case_key: string; name: string; priority: string; tags: string[]; plan: { version: string; actions: Array<{ action: string; requiresApproval?: boolean; requiresWriteApproval?: boolean; locator?: { kind: string; name?: string; value?: string } }> }; test_data_keys: string[]; expected_result: string }
-type BrowserTestExecution = { id: string; status: string; case_id: string; case_key: string; case_name: string; suite_name: string; application_name: string; created_at?: string; actual_outcome?: string; error_code?: string; error_details?: string; policy_warnings?: Array<{ reasonCode: string; hostname?: string; category?: string }>; diagnostics?: Array<{ type: string; method?: string; origin?: string | null; path?: string | null; status?: number; resourceType?: string; message?: string; error?: string }>; steps?: Array<{ id: number; step_number: number; action: string; status: string; expected?: unknown; actual?: unknown; error_code?: string; error_details?: string }>; artifacts?: Array<{ id: string; kind: string; content_type: string }> }
+type BrowserTestExecution = { id: string; status: string; case_id: string; case_key: string; case_name: string; suite_name: string; application_name: string; created_at?: string; actual_outcome?: string; error_code?: string; error_details?: string; video_status?: string; video_error?: string; policy_warnings?: Array<{ reasonCode: string; hostname?: string; category?: string }>; diagnostics?: Array<{ type: string; stage?: string; blockingComponent?: string; failureSource?: string; responseSource?: string; isMainFrameNavigation?: boolean; method?: string; origin?: string | null; path?: string | null; status?: number; resourceType?: string; message?: string; error?: string; reason?: string; hostname?: string; reasonCode?: string }>; steps?: Array<{ id: number; step_number: number; action: string; status: string; expected?: unknown; actual?: unknown; error_code?: string; error_details?: string }>; artifacts?: Array<{ id: string; kind: string; content_type: string }> }
 type BrowserTestPreview = { rowNumber: number; testCaseId: string; name: string; priority: string; tags: string[]; testDataKeys: string[]; stepCount: number; errors: string[] }
 const browserTestCsvTemplate = 'test_case_id,name,preconditions,steps,test_data,expected_result,priority,tags\n' +
   'TC001,Inspect login page,[],"Navigate to /login; Verify that the Sign In heading is visible",{},"Assert that the Sign In heading is visible",High,smoke\n'
@@ -1832,13 +1832,16 @@ function BrowserTestsPage() {
   const [fileName, setFileName] = useState('')
   const [csvText, setCsvText] = useState('')
   const [preview, setPreview] = useState<BrowserTestPreview[]>([])
+  const [selectedPreviewIds, setSelectedPreviewIds] = useState<string[]>([])
   const [previewErrors, setPreviewErrors] = useState<string[]>([])
   const [suiteName, setSuiteName] = useState('')
   const [selectedExecution, setSelectedExecution] = useState<BrowserTestExecution | null>(null)
   const [approvalCase, setApprovalCase] = useState<BrowserTestCase | null>(null)
   const [approvalChecked, setApprovalChecked] = useState(false)
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([])
+  const [recordingDisabledCaseIds, setRecordingDisabledCaseIds] = useState<string[]>([])
   const [queuedCases, setQueuedCases] = useState<BrowserTestCase[]>([])
+  const [runOptions, setRunOptions] = useState({ defaultTimeoutMs: 10000, recordVideo: true, captureScreenshotsOnFailure: true, stopOnFailure: false, recordingPolicy: 'mask-form-values', reuseAuthenticatedSession: false })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
 
@@ -1867,7 +1870,7 @@ function BrowserTestsPage() {
   }
   const previewFile = async (file?: File) => {
     if (!file) return
-    setBusy(true); setMessage(''); setPreview([]); setPreviewErrors([])
+    setBusy(true); setMessage(''); setPreview([]); setPreviewErrors([]); setSelectedPreviewIds([])
     try {
       if (file.size > 2_000_000) throw new Error('CSV file must be 2 MB or smaller.')
       const text = await file.text()
@@ -1878,6 +1881,7 @@ function BrowserTestsPage() {
       })
       const data = await response.json()
       setPreview(data.rows || [])
+      setSelectedPreviewIds((data.rows || []).filter((row: BrowserTestPreview) => !row.errors.length).map((row: BrowserTestPreview) => row.testCaseId))
       setPreviewErrors([...(data.errors || []), ...((data.rowErrors || []).flatMap((row: { rowNumber: number; errors: string[] }) => row.errors.map((error) => 'CSV row ' + row.rowNumber + ': ' + error)))])
       if (data.valid) setMessage('Preview is valid. Review the cases, then import the suite.')
     } catch (error) { setMessage(error instanceof Error ? error.message : 'CSV preview failed.') }
@@ -1888,7 +1892,7 @@ function BrowserTestsPage() {
     try {
       const response = await fetch(API + '/api/browser-tests/import', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ applicationId, filename: fileName, name: suiteName || fileName, csvText }),
+        body: JSON.stringify({ applicationId, filename: fileName, name: suiteName || fileName, csvText, selectedCaseIds: selectedPreviewIds }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Import failed.')
@@ -1906,11 +1910,11 @@ function BrowserTestsPage() {
     setSelectedExecution(data)
     return data as BrowserTestExecution
   }
-  const runCase = async (item: BrowserTestCase, approved: boolean) => {
+  const runCase = async (item: BrowserTestCase, approved: boolean): Promise<string> => {
     setBusy(true); setMessage('')
     try {
       const response = await fetch(API + '/api/browser-tests/cases/' + item.id + '/execute', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved }),
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved, defaultTimeoutMs: runOptions.defaultTimeoutMs, recordVideo: runOptions.recordVideo && !recordingDisabledCaseIds.includes(item.id), recordingPolicy: runOptions.recordingPolicy, reuseAuthenticatedSession: runOptions.reuseAuthenticatedSession, captureScreenshotsOnFailure: runOptions.captureScreenshotsOnFailure }),
       })
       const started = await response.json()
       if (!response.ok) throw new Error(started.error || 'Could not start this test.')
@@ -1922,8 +1926,10 @@ function BrowserTestsPage() {
         if (['PASSED', 'FAILED', 'BLOCKED', 'SKIPPED', 'INTERRUPTED', 'CANCELLED'].includes(latest.status)) break
       }
       await refresh()
+      return (await loadExecution(started.id)).status
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Execution failed.') }
     finally { setBusy(false) }
+    return 'FAILED'
   }
   const runCases = async (items: BrowserTestCase[]) => {
     for (let index = 0; index < items.length; index += 1) {
@@ -1937,7 +1943,22 @@ function BrowserTestsPage() {
         setApprovalChecked(false)
         return
       }
-      await runCase(item, false)
+      const status = await runCase(item, false)
+      if (runOptions.stopOnFailure && ['FAILED', 'BLOCKED'].includes(status)) {
+        const skipped = items.slice(index + 1)
+        for (const pending of skipped) {
+          const response = await fetch(API + '/api/browser-tests/cases/' + pending.id + '/skip', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ reason: 'Skipped after ' + item.case_key + ' failed.' }),
+          })
+          if (!response.ok) throw new Error('Could not persist skipped status for ' + pending.case_key + '.')
+        }
+        await refresh()
+        setSelectedCaseIds([])
+        setQueuedCases([])
+        setMessage('Stopped after ' + item.case_key + ' failed. ' + skipped.length + ' remaining case(s) were recorded as skipped.')
+        return
+      }
     }
     setSelectedCaseIds([])
     setQueuedCases([])
@@ -1955,7 +1976,16 @@ function BrowserTestsPage() {
     setApprovalCase(null)
     setApprovalChecked(false)
     setQueuedCases([])
-    await runCase(approvedCase, true)
+    const status = await runCase(approvedCase, true)
+    if (runOptions.stopOnFailure && ['FAILED', 'BLOCKED'].includes(status)) {
+      for (const pending of remaining) {
+        const response = await fetch(API + '/api/browser-tests/cases/' + pending.id + '/skip', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'Skipped after ' + approvedCase.case_key + ' failed.' }) })
+        if (!response.ok) throw new Error('Could not persist skipped status for ' + pending.case_key + '.')
+      }
+      await refresh()
+      setMessage('Stopped after ' + approvedCase.case_key + ' failed. ' + remaining.length + ' remaining case(s) were recorded as skipped.')
+      return
+    }
     await runCases(remaining)
   }
   const resumeLogin = async () => {
@@ -1973,7 +2003,7 @@ function BrowserTestsPage() {
     setMessage('Cancellation requested. Any in-flight write is treated as uncertain and will not be retried.')
     await loadExecution(selectedExecution.id)
   }
-  const previewIsValid = preview.length > 0 && previewErrors.length === 0 && preview.every((row) => row.errors.length === 0)
+  const previewIsValid = preview.length > 0 && selectedPreviewIds.length > 0 && preview.some((row) => selectedPreviewIds.includes(row.testCaseId) && row.errors.length === 0)
   const waitingForLogin = selectedExecution?.status === 'RUNNING' && selectedExecution.actual_outcome?.includes('Waiting for user')
   const approvalActions = approvalCase?.plan.actions.filter((action) => action.requiresApproval) || []
   const approvalHasWrites = approvalActions.some((action) => action.requiresWriteApproval)
@@ -1991,9 +2021,18 @@ function BrowserTestsPage() {
         <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`} download="chronos-browser-tests-template.csv">Download CSV template</a>
       </div>
       <div className="browser-test-help"><strong>Required columns:</strong> test_case_id, name, preconditions, steps, test_data, expected_result, priority. <strong>Optional:</strong> tags. Preconditions and test_data use JSON. Steps use the documented rule syntax below.</div>
+      <div className="browser-test-import-controls">
+        <label>Default timeout (seconds)<select value={runOptions.defaultTimeoutMs / 1000} onChange={(event) => setRunOptions((current) => ({ ...current, defaultTimeoutMs: Number(event.target.value) * 1000 }))}><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={20}>20 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label>
+        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.recordVideo} onChange={(event) => setRunOptions((current) => ({ ...current, recordVideo: event.target.checked }))} /> Record video</label>
+      <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.reuseAuthenticatedSession} onChange={(event) => setRunOptions((current) => ({ ...current, reuseAuthenticatedSession: event.target.checked }))} /> Reuse manually approved login for this app for 15 minutes</label>
+      <label className="browser-test-approve-check">Recording policy <select value={runOptions.recordingPolicy} onChange={(event) => setRunOptions((current) => ({ ...current, recordingPolicy: event.target.value }))}><option value="mask-form-values">Mask form values (recommended)</option><option value="disabled">Disable recording for sensitive workflows</option></select></label>
+      <p className="browser-test-subtitle">Form values are visually masked in recordings. Pages that display sensitive values outside form controls should use the disabled policy or disable recording for that case.</p>
+        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.captureScreenshotsOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, captureScreenshotsOnFailure: event.target.checked }))} /> Screenshots on failure</label>
+        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.stopOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, stopOnFailure: event.target.checked }))} /> Stop on first failure</label>
+      </div>
       {preview.length > 0 && <><div className="browser-test-preview-title"><strong>{fileName}</strong><span>{preview.length} cases · {previewErrors.length ? previewErrors.length + ' validation errors' : 'all rows valid'}</span></div>
-        <div className="table-wrap"><table><thead><tr><th>Row / ID</th><th>Case</th><th>Priority</th><th>Data keys</th><th>Plan actions</th><th>Validation</th></tr></thead><tbody>{preview.map((row) => <tr key={row.rowNumber}><td>{row.rowNumber} · {row.testCaseId}</td><td>{row.name}</td><td>{row.priority}</td><td>{row.testDataKeys.join(', ') || '—'}</td><td>{row.stepCount}</td><td>{row.errors.length ? row.errors.join('; ') : 'Valid'}</td></tr>)}</tbody></table></div>
-        {previewIsValid && <button className="button button-primary" disabled={busy} onClick={importSuite}>{busy ? 'Importing…' : 'Import validated suite'}</button>}
+        <div className="table-wrap"><table><thead><tr><th>Select</th><th>Row / ID</th><th>Case</th><th>Priority</th><th>Data keys</th><th>Plan actions</th><th>Validation</th></tr></thead><tbody>{preview.map((row) => <tr key={row.rowNumber}><td><input type="checkbox" aria-label={'Select CSV row ' + row.rowNumber} disabled={row.errors.length > 0} checked={selectedPreviewIds.includes(row.testCaseId)} onChange={(event) => setSelectedPreviewIds((current) => event.target.checked ? [...current, row.testCaseId] : current.filter((id) => id !== row.testCaseId))} /></td><td>{row.rowNumber} · {row.testCaseId}</td><td>{row.name}</td><td>{row.priority}</td><td>{row.testDataKeys.join(', ') || '—'}</td><td>{row.stepCount}</td><td>{row.errors.length ? row.errors.join('; ') : 'Valid'}</td></tr>)}</tbody></table></div>
+        {previewIsValid && <button className="button button-primary" disabled={busy} onClick={importSuite}>{busy ? 'Importing…' : `Import ${selectedPreviewIds.length} selected valid cases`}</button>}
       </>}
       {previewErrors.length > 0 && <ul className="browser-test-errors">{previewErrors.slice(0, 20).map((error, index) => <li key={index}>{error}</li>)}</ul>}
     </section>
@@ -2008,14 +2047,15 @@ function BrowserTestsPage() {
     </div>
 
     {cases.length > 0 && <section className="card browser-test-cases"><div className="card-heading"><div><div className="eyebrow">VALIDATED ACTION PLANS</div><h2>Test cases</h2><p>Interactive steps require a separate approval for each run. Requests remain limited by the application security policy.</p></div><button className="button button-primary" disabled={busy || selectedCaseIds.length === 0} onClick={() => runSelectedCases().catch((error) => setMessage(error.message))}>Run selected ({selectedCaseIds.length})</button></div>
-      <div className="table-wrap"><table><thead><tr><th><input aria-label="Select all test cases" type="checkbox" checked={cases.length > 0 && selectedCaseIds.length === cases.length} onChange={(event) => setSelectedCaseIds(event.target.checked ? cases.map((item) => item.id) : [])} /></th><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><input aria-label={'Select ' + item.case_key} type="checkbox" disabled={active} checked={selectedCaseIds.includes(item.id)} onChange={(event) => setSelectedCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></td><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th><input aria-label="Select all test cases" type="checkbox" checked={cases.length > 0 && selectedCaseIds.length === cases.length} onChange={(event) => setSelectedCaseIds(event.target.checked ? cases.map((item) => item.id) : [])} /></th><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Recording</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><input aria-label={'Select ' + item.case_key} type="checkbox" disabled={active} checked={selectedCaseIds.includes(item.id)} onChange={(event) => setSelectedCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></td><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><label><input aria-label={'Disable recording for ' + item.case_key} type="checkbox" checked={recordingDisabledCaseIds.includes(item.id)} onChange={(event) => setRecordingDisabledCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Disable for this case</label></td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
     </section>}
 
     {selectedExecution && <section className="card browser-test-execution-detail"><div className="card-heading"><div><div className="eyebrow">EXECUTION DETAIL · {selectedExecution.id}</div><h2>{selectedExecution.case_key} · {selectedExecution.case_name}</h2><p>{selectedExecution.actual_outcome || selectedExecution.error_details || 'Execution is in progress.'}</p></div><StatusBadge status={selectedExecution.status} />{['QUEUED', 'RUNNING'].includes(selectedExecution.status) && <button className="button button-secondary" onClick={() => cancelExecution().catch((error) => setMessage(error.message))}>Cancel run</button>}</div>
       {waitingForLogin && <div className="browser-test-auth-prompt"><strong>Manual login is open in the isolated browser window.</strong><span>Complete the login there, then resume the test. Credentials are not captured in screenshots or recordings.</span><button className="button button-primary" onClick={resumeLogin}>Resume after manual login</button></div>}
       {selectedExecution.error_code && <div className="exploration-warning-box">{selectedExecution.error_code}: {selectedExecution.error_details}</div>}
+      <p className="browser-test-subtitle">Recording: {selectedExecution.video_status || 'status unavailable'}{selectedExecution.video_error ? ' · ' + selectedExecution.video_error : ''}</p>
       {selectedExecution.policy_warnings?.length ? <div className="exploration-warning-box">Policy warnings: {selectedExecution.policy_warnings.map((item) => item.reasonCode + (item.hostname ? ' · ' + item.hostname : '')).join('; ')}</div> : null}
-      {!!selectedExecution.diagnostics?.length && <details className="browser-test-diagnostics"><summary>Sanitized browser and network diagnostics ({selectedExecution.diagnostics.length})</summary><ul>{selectedExecution.diagnostics.map((item, index) => <li key={index}>{[item.type, item.method, item.origin && item.path ? item.origin + item.path : null, item.status ? 'HTTP ' + item.status : null, item.resourceType, item.message || item.error].filter(Boolean).join(' · ')}</li>)}</ul></details>}
+      {!!selectedExecution.diagnostics?.length && <details className="browser-test-diagnostics"><summary>Sanitized browser and network diagnostics ({selectedExecution.diagnostics.length})</summary><ul>{selectedExecution.diagnostics.map((item, index) => <li key={index}>{[item.type, item.reasonCode, item.stage, item.blockingComponent || item.failureSource || item.responseSource, item.isMainFrameNavigation === undefined ? null : item.isMainFrameNavigation ? 'main document' : 'subresource', item.hostname, item.method, item.origin && item.path ? item.origin + item.path : null, item.status ? 'HTTP ' + item.status : null, item.resourceType, item.message || item.error, item.reason].filter(Boolean).join(' · ')}</li>)}</ul></details>}
       {!!selectedExecution.steps?.length && <div className="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Expected</th><th>Actual / error</th></tr></thead><tbody>{selectedExecution.steps.map((step) => <tr key={step.id}><td>{step.step_number}</td><td>{step.action}</td><td>{step.status}</td><td>{JSON.stringify(step.expected)}</td><td>{step.error_details || JSON.stringify(step.actual)}</td></tr>)}</tbody></table></div>}
       <div className="browser-test-artifacts"><a className="button button-secondary" href={API + '/api/browser-tests/executions/' + selectedExecution.id + '/report'} download>Download report</a>{selectedExecution.artifacts?.map((artifact) => <a key={artifact.id} className="button button-secondary" href={API + '/api/browser-tests/artifacts/' + artifact.id} target="_blank" rel="noreferrer">{artifact.kind === 'screenshot' ? 'View screenshot' : artifact.kind === 'video' ? 'View recording' : 'Download trace'}</a>)}</div>
     </section>}

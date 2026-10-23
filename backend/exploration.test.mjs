@@ -255,6 +255,36 @@ test('Explicit authentication navigation origin works while resource approval st
   }
 })
 
+test('Exploration follows a public cross-domain authentication redirect without per-origin registration', async () => {
+  const mockPool = new TestMemoryPool()
+  setDatabasePoolForTesting(mockPool)
+  const server = http.createServer((request, response) => {
+    if (request.headers.host?.startsWith('app.public.example')) {
+      response.writeHead(302, { location: 'http://identity.public.example/signin' })
+      response.end()
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.end('<!doctype html><title>Federated Sign In</title><h1>Continue with your organization</h1>')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const app = { id: 'app-cross-origin-redirect', name: 'Public Portal', base_url: 'http://app.public.example', status: 'Active' }
+  mockPool.applications.set(app.id, app)
+  try {
+    const result = await runExploration({ applicationId: app.id, targetUrl: app.base_url }, {
+      dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }],
+      testTargetIp: '127.0.0.1',
+      testTargetPort: server.address().port,
+      persist: false,
+    })
+    assert.equal(result.status, 'SUCCESS')
+    assert.equal(result.title, 'Federated Sign In')
+    assert.equal(result.targetUrl, 'http://identity.public.example/signin')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('Redirect to prohibited host is blocked and prohibited endpoint receives zero requests', async () => {
   let prohibitedHits = 0
   const prohibitedServer = http.createServer((_req, res) => {
@@ -302,7 +332,7 @@ test('Redirect to prohibited host is blocked and prohibited endpoint receives ze
     // The prohibited server must NEVER have been contacted
     assert.equal(prohibitedHits, 0, 'Prohibited endpoint must receive exactly zero requests')
     assert.ok(['SECURITY_BLOCKED', 'FAILED', 'PARTIAL'].includes(result.status))
-    assert.ok(result.warnings.some((item) => typeof item !== 'string' && ['OUT_OF_SCOPE', 'REDIRECT_BLOCKED'].includes(item.outcome)))
+    assert.ok(result.warnings.some((item) => typeof item !== 'string' && ['OUT_OF_SCOPE', 'REDIRECT_BLOCKED', 'PRIVATE_IP_BLOCKED', 'PORT_BLOCKED'].includes(item.outcome)))
   } finally {
     await new Promise((resolve) => allowedServer.close(resolve))
     await new Promise((resolve) => prohibitedServer.close(resolve))
