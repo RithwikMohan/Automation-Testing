@@ -12,9 +12,9 @@ export function getDatabasePool() {
   pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     max: Number(process.env.DATABASE_POOL_MAX || 5),
-    connectionTimeoutMillis: Number(process.env.DATABASE_CONNECTION_TIMEOUT_MS || 5_000),
+    connectionTimeoutMillis: Number(process.env.DATABASE_CONNECTION_TIMEOUT_MS || 15_000),
     idleTimeoutMillis: 30_000,
-    ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: false },
+    ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true },
   })
   return pool
 }
