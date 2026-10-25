@@ -12,6 +12,7 @@ import {
   normalizeAllowedOrigin,
   isManualLoginPostAllowed,
   isApprovedWritePostAllowed,
+  isApprovedWorkflowPostbackAllowed,
 } from './exploration/networkSecurity.mjs'
 
 test('IP parser parses IPv4, IPv6, and IPv4-mapped IPv6 accurately', () => {
@@ -397,4 +398,15 @@ test('Approved business writes are limited to the active operation form path and
   assert.equal(isApprovedWritePostAllowed({ ...common, contentType: 'application/json' }), false)
   assert.equal(isApprovedWritePostAllowed({ ...common, method: 'DELETE' }), false)
   assert.equal(isApprovedWritePostAllowed({ ...common, authorization: { ...authorization, operation: 'arbitrary' } }), false)
+})
+
+test('reviewed workflow postbacks are limited to the exact captured form navigation', () => {
+  const authorization = { captured: true, method: 'POST', origin: 'https://app.example.test', path: '/home' }
+  const common = { method: 'POST', targetUrl: 'https://app.example.test/home?session=opaque', contentType: 'application/x-www-form-urlencoded', authorization }
+  assert.equal(isApprovedWorkflowPostbackAllowed(common), true)
+  assert.equal(isApprovedWorkflowPostbackAllowed({ ...common, targetUrl: 'https://app.example.test/other' }), false)
+  assert.equal(isApprovedWorkflowPostbackAllowed({ ...common, targetUrl: 'https://attacker.example.test/home' }), false)
+  assert.equal(isApprovedWorkflowPostbackAllowed({ ...common, contentType: 'application/json' }), false)
+  assert.equal(isApprovedWorkflowPostbackAllowed({ ...common, method: 'DELETE' }), false)
+  assert.equal(isApprovedWorkflowPostbackAllowed({ ...common, authorization: { ...authorization, captured: false } }), false)
 })

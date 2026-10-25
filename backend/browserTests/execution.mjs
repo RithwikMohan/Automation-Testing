@@ -3,8 +3,9 @@ import { mkdir, rename, stat, writeFile } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
 import { URL } from 'node:url'
 import { validateActionPlan } from './actionRegistry.mjs'
+import { resolveWorkflowLocator } from '../workflows/locatorResolution.mjs'
 import { chromium } from 'playwright'
-import { createSecurityProxy, isApprovedWritePostAllowed, isManualLoginPostAllowed, normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
+import { createSecurityProxy, isApprovedWritePostAllowed, isApprovedWorkflowPostbackAllowed, isManualLoginPostAllowed, normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
 import {
   getBrowserTestCaseById,
   persistBrowserTestArtifact,
@@ -20,6 +21,13 @@ const approvedSessionStates = new Map()
 const MAX_EXECUTION_MS = 120_000
 const AUTH_STATE_TTL_MS = 15 * 60_000
 
+export function rememberApprovedBrowserSession(applicationId, state) {
+  if (typeof applicationId !== 'string' || !state || !Array.isArray(state.cookies) || !Array.isArray(state.origins)) return false
+  for (const [key, entry] of approvedSessionStates) if (entry.expiresAt <= Date.now()) approvedSessionStates.delete(key)
+  approvedSessionStates.set(applicationId, { state, expiresAt: Date.now() + AUTH_STATE_TTL_MS })
+  return true
+}
+
 export class BrowserTestError extends Error {
   constructor(code, message, status = 'FAILED') {
     super(message)
@@ -32,7 +40,7 @@ export class BrowserTestError extends Error {
 function safeText(value, testData = {}) {
   let result = String(value ?? '').slice(0, 2000)
   for (const item of Object.values(testData)) {
-    if (typeof item === 'string' && item.length >= 4) result = result.split(item).join('[redacted]')
+    if (typeof item === 'string' && item.length > 0) result = result.split(item).join('[redacted]')
   }
   return result
     .replace(/\bBearer\s+[A-Za-z0-9._~-]+/gi, 'Bearer [redacted]')
@@ -52,6 +60,8 @@ function buildLocator(page, spec) {
   if (spec.kind === 'placeholder') return page.getByPlaceholder(spec.value, { exact: true })
   if (spec.kind === 'testid') return page.getByTestId(spec.value)
   if (spec.kind === 'css') return page.locator(spec.value)
+  if (spec.kind === 'id') return page.locator(`#${String(spec.value).replace(/([^a-zA-Z0-9_-])/g, '\\$1')}`)
+  if (spec.kind === 'name') return page.locator(`[name="${String(spec.value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"]`)
   throw new BrowserTestError('UNSUPPORTED_LOCATOR', 'The saved plan contains an unsupported locator.', 'BLOCKED')
 }
 
@@ -60,6 +70,21 @@ async function uniqueLocator(page, spec) {
   const count = await locator.count()
   if (count !== 1) throw new BrowserTestError(count === 0 ? 'LOCATOR_NOT_FOUND' : 'AMBIGUOUS_LOCATOR', count === 0 ? 'The locator did not match a visible element.' : 'The locator matched more than one element.')
   return locator
+}
+
+async function uniqueActionLocator(page, action, timeoutMs = 0) {
+  if (Array.isArray(action.locatorCandidates) && action.locatorCandidates.length) {
+    try { return (await resolveWorkflowLocator(page, action, { timeoutMs })).locator }
+    catch (error) {
+      const currentPage = safePageUrl(page)
+      const capturedPage = action.pageUrl ? safePageUrl({ url: () => action.pageUrl }) : ''
+      const pageContext = capturedPage && currentPage
+        ? capturedPage === currentPage ? ` Captured page: ${capturedPage}.` : ` Captured page: ${capturedPage}; current page: ${currentPage}.`
+        : currentPage ? ` Current page: ${currentPage}.` : ''
+      throw new BrowserTestError(error.code || 'LOCATOR_NOT_FOUND', (error.message || 'No captured locator matched the target element.') + pageContext)
+    }
+  }
+  return uniqueLocator(page, action.locator)
 }
 
 function locatorDescription(spec) {
@@ -171,6 +196,7 @@ export async function executeBrowserTest(executionId, options = {}) {
   const manualAuthPaths = new Set()
   const manualAuthOrigins = new Set()
   let activeWriteAuthorization = null
+  let activeWorkflowPostback = null
   let policyBlock = null
   let stepNumber = 0
   let videoPath
@@ -202,10 +228,15 @@ export async function executeBrowserTest(executionId, options = {}) {
     if (app.application_status !== 'Active') throw new BrowserTestError('APPLICATION_ARCHIVED', 'The registered application is not active.', 'BLOCKED')
     const plan = testCase.plan
     try { validateActionPlan(plan, testData) } catch (error) { throw new BrowserTestError(error.code || 'INVALID_PLAN', error.message, 'BLOCKED') }
+    const planHasCsvCredentials = plan.actions.some((action) => action.credentialInput === true)
+    if (planHasCsvCredentials && app.application_auth_method !== 'manual') throw new BrowserTestError('INVALID_PLAN', 'CSV credential login steps require the application to use manual authentication.', 'BLOCKED')
     if (plan.actions.some((action) => ['create', 'update', 'delete'].includes(action.action) && (action.requiresApproval !== true || action.requiresWriteApproval !== true))) {
       throw new BrowserTestError('INVALID_PLAN', 'Every saved write action must carry explicit interactive and write approval requirements.', 'BLOCKED')
     }
     if (plan.actions.some((action) => action.requiresApproval) && !executionId.approvedInteractions) throw new BrowserTestError('APPROVAL_REQUIRED', 'This plan contains interactive actions and needs explicit run approval.', 'BLOCKED')
+    if (plan.actions.some((action) => ['create', 'update', 'delete'].includes(action.action)) && options.allowWrites !== true) {
+      throw new BrowserTestError('WRITE_MODE_REQUIRED', 'This test contains write actions. Enable writes and approve the reviewed form actions for this run.', 'BLOCKED')
+    }
 
     const appUrl = new URL(app.application_base_url)
     const loginUrl = app.application_login_url || app.application_base_url
@@ -234,6 +265,7 @@ export async function executeBrowserTest(executionId, options = {}) {
       manualAuthPaths,
       isManualAuthActive: () => manualAuthActive,
       isApprovedWriteRequest: (request) => isApprovedWritePostAllowed({ ...request, authorization: activeWriteAuthorization }),
+      isApprovedWorkflowPostback: (request) => isApprovedWorkflowPostbackAllowed({ ...request, authorization: activeWorkflowPostback }),
       dnsLookup: options.dnsLookup,
       testTargetIp: options.testTargetIp,
       testTargetPort: options.testTargetPort,
@@ -246,7 +278,7 @@ export async function executeBrowserTest(executionId, options = {}) {
       },
     })
     throwIfCancelled()
-    const cachedAuth = reuseAuthenticatedSession ? approvedSessionStates.get(String(app.application_id)) : null
+    const cachedAuth = reuseAuthenticatedSession && !planHasCsvCredentials ? approvedSessionStates.get(String(app.application_id)) : null
     const cachedStorageState = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.state : undefined
     if (cachedAuth && !cachedStorageState) approvedSessionStates.delete(String(app.application_id))
     browser = await chromium.launch({
@@ -322,7 +354,8 @@ export async function executeBrowserTest(executionId, options = {}) {
         isManualAuthActive: () => manualAuthActive,
       })
       const isApprovedWritePost = isApprovedWritePostAllowed({ method, targetUrl: parsed, contentType, authorization: activeWriteAuthorization })
-      if (method !== 'GET' && method !== 'HEAD' && !isManualLoginPost && !isApprovedWritePost) {
+      const isApprovedPostback = request.isNavigationRequest() && request.resourceType() === 'document' && isApprovedWorkflowPostbackAllowed({ method, targetUrl: parsed, contentType, authorization: activeWorkflowPostback })
+      if (method !== 'GET' && method !== 'HEAD' && !isManualLoginPost && !isApprovedWritePost && !isApprovedPostback) {
         recordPolicyWarning('READ_ONLY_METHOD_BLOCKED', parsed.hostname, request.resourceType(), isMainNavigation)
         recordDiagnostic({ type: 'request_blocked', stage: isMainNavigation ? 'main_document' : 'subresource', blockingComponent: 'Chronos read-only request policy', reasonCode: 'READ_ONLY_METHOD_BLOCKED', method, ...safeDiagnosticUrl(request.url()), resourceType: request.resourceType(), isMainFrameNavigation: isMainNavigation, reason: 'Chronos blocked this non-GET/HEAD request under the read-only policy.' })
         return route.abort('blockedbyclient')
@@ -381,20 +414,20 @@ export async function executeBrowserTest(executionId, options = {}) {
     if (app.application_auth_method === 'manual' && !cachedStorageState) {
       manualAuthActive = true
       await captureManualAuthForms()
-      await updateBrowserTestExecution(runId, { actualOutcome: 'Waiting for user to complete manual login and resume the test.' })
-      await waitForManualLogin(runId, 300_000)
-      manualAuthActive = false
-      const currentOrigin = normalizeAllowedOrigin(new URL(page.url()).origin)
-      if (!navOrigins.has(currentOrigin)) throw new BrowserTestError('LOGIN_ORIGIN_BLOCKED', 'After manual login, the browser was outside approved application navigation origins.', 'BLOCKED')
-      const stillHasPasswordField = await page.locator('input[type="password"]').count().catch(() => 0)
-      if (stillHasPasswordField && new URL(page.url()).pathname === new URL(loginUrl).pathname) throw new BrowserTestError('AUTHENTICATION_NOT_CONFIRMED', 'The login page is still active after manual confirmation.', 'BLOCKED')
-      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
-      if (reuseAuthenticatedSession) {
-        // Keep cookies/local storage only in process memory for this registered app.
-        // The state is never serialized to disk, returned by an API, or included in diagnostics.
-        const approvedState = await context.storageState()
-        for (const [key, entry] of approvedSessionStates) if (entry.expiresAt <= Date.now()) approvedSessionStates.delete(key)
-        approvedSessionStates.set(String(app.application_id), { state: approvedState, expiresAt: Date.now() + AUTH_STATE_TTL_MS })
+      if (!planHasCsvCredentials) {
+        await updateBrowserTestExecution(runId, { actualOutcome: 'Waiting for user to complete manual login and resume the test.' })
+        await waitForManualLogin(runId, 300_000)
+        manualAuthActive = false
+        const currentOrigin = normalizeAllowedOrigin(new URL(page.url()).origin)
+        if (!navOrigins.has(currentOrigin)) throw new BrowserTestError('LOGIN_ORIGIN_BLOCKED', 'After manual login, the browser was outside approved application navigation origins.', 'BLOCKED')
+        const stillHasPasswordField = await page.locator('input[type="password"]').count().catch(() => 0)
+        if (stillHasPasswordField && new URL(page.url()).pathname === new URL(loginUrl).pathname) throw new BrowserTestError('AUTHENTICATION_NOT_CONFIRMED', 'The login page is still active after manual confirmation.', 'BLOCKED')
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {})
+        if (reuseAuthenticatedSession) {
+          const approvedState = await context.storageState()
+          for (const [key, entry] of approvedSessionStates) if (entry.expiresAt <= Date.now()) approvedSessionStates.delete(key)
+          approvedSessionStates.set(String(app.application_id), { state: approvedState, expiresAt: Date.now() + AUTH_STATE_TTL_MS })
+        }
       }
     } else if (app.application_auth_method === 'manual' && cachedStorageState) {
       const currentOrigin = normalizeAllowedOrigin(new URL(page.url()).origin)
@@ -427,12 +460,30 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = { url: safePageUrl(page) }
           expected = { url: action.url }
         } else if (action.action === 'click') {
-          const locator = await uniqueLocator(page, action.locator)
-          await locator.click({ timeout: actionTimeoutMs })
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
+          if (action.postbackAuthorization) {
+            const auth = action.postbackAuthorization
+            if (!navOrigins.has(normalizeAllowedOrigin(auth.origin))) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The captured form postback origin is outside the selected registered application navigation scope.', 'BLOCKED')
+            const form = await locator.evaluate((element) => {
+              const owner = element.form || element.closest('form')
+              if (!owner || owner.method.toUpperCase() !== 'POST') return null
+              try { const target = new URL(owner.action, location.href); return { origin: target.origin, path: target.pathname } } catch { return null }
+            })
+            if (!form || form.origin !== auth.origin || form.path !== auth.path) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The captured form postback no longer matches its reviewed origin and path.', 'BLOCKED')
+            activeWorkflowPostback = auth
+            try { await locator.click({ timeout: actionTimeoutMs }) } finally { activeWorkflowPostback = null }
+          } else {
+            await locator.click({ timeout: actionTimeoutMs })
+          }
+          if (action.manualLoginSubmit === true) {
+            await page.locator('input[type="password"]:visible').waitFor({ state: 'hidden', timeout: actionTimeoutMs }).catch(() => {})
+            if (await page.locator('input[type="password"]:visible').count().catch(() => 0)) throw new BrowserTestError('AUTHENTICATION_FAILED', 'The application still shows its password prompt after the captured login submission.')
+            manualAuthActive = false
+          }
           actual = 'Element clicked.'
           expected = locatorDescription(action.locator)
         } else if (['create', 'update', 'delete'].includes(action.action)) {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           const form = await locator.evaluate((element) => {
             const owner = element.form || element.closest('form')
             if (!owner || owner.method.toUpperCase() !== 'POST') return null
@@ -441,7 +492,8 @@ export async function executeBrowserTest(executionId, options = {}) {
               return { origin: target.origin, path: target.pathname }
             } catch { return null }
           })
-          if (!form || form.origin !== appUrl.origin) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The approved write control must submit a POST form to the registered application origin.', 'BLOCKED')
+          if (!form || (action.writeAuthorization ? action.writeAuthorization.origin !== form.origin : form.origin !== appUrl.origin)) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The approved write control must submit a POST form to the exact origin recorded in the selected reviewed workflow.', 'BLOCKED')
+          if (action.writeAuthorization && (action.writeAuthorization.origin !== appUrl.origin || action.writeAuthorization.path !== form.path || action.writeAuthorization.operation !== action.action || action.writeAuthorization.method !== 'POST')) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The captured write form no longer matches its reviewed registered application path.', 'BLOCKED')
           activeWriteAuthorization = { operation: action.action, origin: appUrl.origin, path: form.path }
           let writeResponse
           const responseWait = page.waitForResponse((response) => {
@@ -462,38 +514,38 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = 'Approved ' + action.action + ' form returned HTTP ' + writeResponse.status() + '; the application result still requires assertion.'
           expected = { operation: action.action, formPath: form.path, verifiedByFollowingAssertion: true }
         } else if (action.action === 'fill') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.fill(String(testCase.test_data[action.dataKey]), { timeout: actionTimeoutMs })
           actual = 'Field filled; submitted data is not recorded.'
           expected = { locator: locatorDescription(action.locator), value: '[test data reference]' }
         } else if (action.action === 'select') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           if (action.optionLabel) await locator.selectOption({ label: action.optionLabel }, { timeout: actionTimeoutMs })
           else await locator.selectOption(String(testCase.test_data[action.dataKey]), { timeout: actionTimeoutMs })
           actual = 'Option selected; submitted data is not recorded.'
           expected = { locator: locatorDescription(action.locator), value: '[test data reference]' }
         } else if (action.action === 'check' || action.action === 'uncheck') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator[action.action]({ timeout: actionTimeoutMs })
           actual = action.action === 'check' ? 'Checkbox checked.' : 'Checkbox unchecked.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'wait_visible') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.waitFor({ state: 'visible', timeout: action.timeoutMs })
           actual = 'Element became visible.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'read_text') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.waitFor({ state: 'visible', timeout: actionTimeoutMs })
           actual = safeText(await locator.innerText({ timeout: actionTimeoutMs }), testCase.test_data)
           expected = { resultKey: action.resultKey }
         } else if (action.action === 'assert_visible') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.waitFor({ state: 'visible', timeout: actionTimeoutMs })
           actual = 'Element is visible.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'assert_text') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.waitFor({ state: 'visible', timeout: actionTimeoutMs })
           const observed = safeText(await locator.innerText({ timeout: actionTimeoutMs }), testCase.test_data)
           if (!observed.includes(action.expected)) throw new BrowserTestError('ASSERTION_FAILED', 'Visible text did not contain the expected text "' + action.expected + '".')
@@ -506,7 +558,7 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = observed
           expected = { [action.operator]: action.expected }
         } else if (action.action === 'assert_value') {
-          const locator = await uniqueLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           await locator.waitFor({ state: 'visible', timeout: actionTimeoutMs })
           const observedValue = await locator.inputValue({ timeout: actionTimeoutMs }).catch(() => locator.innerText({ timeout: actionTimeoutMs }))
           const expectedValue = String(testCase.test_data[action.dataKey])
@@ -514,7 +566,7 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = 'Field value matches.'
           expected = { dataKey: action.dataKey }
         } else if (action.action === 'assert_count_gt') {
-          const locator = buildLocator(page, action.locator)
+          const locator = await uniqueActionLocator(page, action, actionTimeoutMs)
           const count = await locator.count()
           if (count <= action.threshold) throw new BrowserTestError('ASSERTION_FAILED', 'Element count was ' + count + ', expected greater than ' + action.threshold + '.')
           actual = 'Count: ' + count

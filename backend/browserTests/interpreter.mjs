@@ -25,7 +25,7 @@ function parseLocator(raw, lineNumber) {
   }
 
   // Strict: text="...", label="...", placeholder="...", testid="..."
-  match = value.match(/^(text|label|placeholder|testid)="([^"\n]{1,160})"$/)
+  match = value.match(/^(text|label|placeholder|testid|id|name)="([^"\n]{1,160})"$/)
   if (match) return { kind: match[1], value: match[2] }
 
   // Strict: css=#id or css=.class
@@ -44,7 +44,7 @@ function parseNaturalLocator(phrase, lineNumber) {
   const trimmed = phrase.trim()
 
   // Explicit strict locators take priority
-  if (/^(role=|text=|label=|placeholder=|testid=|css=)/.test(trimmed)) {
+  if (/^(role=|text=|label=|placeholder=|testid=|id=|name=|css=)/.test(trimmed)) {
     return parseLocator(trimmed, lineNumber)
   }
 

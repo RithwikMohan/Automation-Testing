@@ -288,6 +288,21 @@ export function isApprovedWritePostAllowed({ method, targetUrl, contentType, aut
   return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
 }
 
+/** Permit only the exact observed form POST attached to a reviewed navigation click. */
+export function isApprovedWorkflowPostbackAllowed({ method, targetUrl, contentType, authorization }) {
+  if (method !== 'POST' || !authorization || authorization.captured !== true || authorization.method !== 'POST') return false
+  let target
+  let approvedOrigin
+  try {
+    target = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
+    approvedOrigin = normalizeAllowedOrigin(authorization.origin)
+  } catch {
+    return false
+  }
+  if (!originAllowed(target, new Set([approvedOrigin])) || target.pathname !== authorization.path) return false
+  return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
+}
+
 function originAllowed(url, origins) {
   try { return origins.has(normalizeAllowedOrigin(url.origin)) } catch { return false }
 }
@@ -401,6 +416,8 @@ export async function createSecurityProxy(config) {
     manualAuthPaths,
     isManualAuthActive = () => false,
     isApprovedWriteRequest = () => false,
+    isApprovedWorkflowPostback = () => false,
+    manualCaptureRequestAllowed = () => false,
     allowPublicOrigins = false,
   } = config
 
@@ -440,7 +457,9 @@ export async function createSecurityProxy(config) {
       isManualAuthActive,
     })
     const approvedWritePost = isApprovedWriteRequest({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !manualLoginPost && !approvedWritePost) {
+    const approvedWorkflowPostback = isApprovedWorkflowPostback({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
+    const manuallyCapturedWrite = manualCaptureRequestAllowed({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !manualLoginPost && !approvedWritePost && !approvedWorkflowPostback && !manuallyCapturedWrite) {
       audit('OUT_OF_SCOPE', targetUrl.href, { category: 'unknown', reason: 'Read-only policy blocks non-GET/HEAD requests.' })
       res.writeHead(403, { 'content-type': 'text/plain' })
       return res.end('Forbidden by read-only policy.')

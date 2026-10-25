@@ -16,6 +16,8 @@ import {
   duplicateAutomationDefinition,
   findArtifact,
   getApplicationById,
+  getApplicationWorkflowVersion,
+  listApplicationWorkflowVersions,
   getAutomationDefinitionById,
   initializeDatabase,
   listApplications,
@@ -45,7 +47,9 @@ import { runExploration } from './exploration/explorationRunner.mjs'
 import { generateTaskPlan, PlanningError } from './planning/taskPlanning.mjs'
 import { parseTestCaseCsv } from './browserTests/csvImport.mjs'
 import { compileTestCase } from './browserTests/interpreter.mjs'
+import { applyReviewedWorkflowLocators, workflowStepsMatch } from './workflows/workflowDefinition.mjs'
 import { cancelBrowserTestExecution, startBrowserTestExecution, waitForBrowserTestLogin } from './browserTests/execution.mjs'
+import { beginWorkflowCapture, cancelWorkflowCapture, finishWorkflowCapture, getWorkflowCapture, getWorkflowTemplateForApplication, navigateWorkflowCapture, pauseWorkflowCapture, resumeWorkflowCapture, saveReviewedWorkflowCapture, startWorkflowCaptureForApplication } from './browserTests/workflowRecorder.mjs'
 import { isAuthorizedHrRequest, isRegisteredHcmApp } from './integrations/oracleHcm/hrAccess.mjs'
 import { captureHcmInspection, closeHcmInspection, resumeHcmInspection, startHcmInspection } from './integrations/oracleHcm/inspection.mjs'
 import {
@@ -69,7 +73,7 @@ function json(response, status, body) {
     'cache-control': 'no-store',
     'access-control-allow-origin': corsOrigin,
     'access-control-allow-headers': 'content-type, x-chronos-hr-token',
-    'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+    'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
   })
   response.end(JSON.stringify(body))
 }
@@ -434,7 +438,7 @@ const server = createServer(async (request, response) => {
     response.writeHead(204, {
       'access-control-allow-origin': corsOrigin,
       'access-control-allow-headers': 'content-type, x-chronos-hr-token',
-      'access-control-allow-methods': 'GET, POST, PATCH, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     })
     return response.end()
   }
@@ -491,6 +495,63 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         return phase1Error(response, error)
       }
+    }
+  }
+
+  const workflowTemplateMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/workflow-template$/)
+  if (workflowTemplateMatch && request.method === 'GET') {
+    try {
+      const application = await getApplicationById(workflowTemplateMatch[1])
+      if (!application || application.status !== 'Active') return json(response, 404, { error: 'Active registered application not found.' })
+      const requestedVersion = searchParams.get('version')
+      if (requestedVersion !== null && (!/^\d+$/.test(requestedVersion) || Number(requestedVersion) < 1)) return json(response, 400, { error: 'Workflow version must be a positive integer.' })
+      const template = requestedVersion ? await getApplicationWorkflowVersion(application.id, Number(requestedVersion)) : await getWorkflowTemplateForApplication(application.id)
+      return template ? json(response, 200, template) : json(response, 404, { error: 'No workflow has been recorded for this application yet.' })
+    } catch (error) { return phase1Error(response, error) }
+  }
+  const workflowVersionsMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/workflow-versions$/)
+  if (workflowVersionsMatch && request.method === 'GET') {
+    try {
+      const application = await getApplicationById(workflowVersionsMatch[1])
+      if (!application || application.status !== 'Active') return json(response, 404, { error: 'Active registered application not found.' })
+      return json(response, 200, await listApplicationWorkflowVersions(application.id))
+    } catch (error) { return phase1Error(response, error) }
+  }
+  const workflowRecordStart = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/workflow-recordings$/)
+  if (workflowRecordStart && request.method === 'POST') {
+    try { return json(response, 201, await startWorkflowCaptureForApplication(workflowRecordStart[1])) }
+    catch (error) { return json(response, 400, { error: sanitizedError(error) }) }
+  }
+  const workflowNavigateMatch = pathname.match(/^\/api\/workflow-recordings\/([a-f0-9-]+)\/navigate$/)
+  if (workflowNavigateMatch && request.method === 'POST') {
+    try { const body = await readJson(request); return json(response, 200, await navigateWorkflowCapture(workflowNavigateMatch[1], body.url)) }
+    catch (error) { return json(response, 400, { error: sanitizedError(error) }) }
+  }
+  const workflowRecordMatch = pathname.match(/^\/api\/workflow-recordings\/([a-f0-9-]+)(?:\/(begin|pause|resume|finish|save))?$/)
+  if (workflowRecordMatch) {
+    const [, recordingId, operation] = workflowRecordMatch
+    if (request.method === 'GET' && !operation) {
+      const capture = getWorkflowCapture(recordingId)
+      return capture ? json(response, 200, capture) : json(response, 404, { error: 'Workflow recording expired or is no longer active.' })
+    }
+    if (request.method === 'POST' && operation === 'begin') {
+      return await beginWorkflowCapture(recordingId) ? json(response, 200, getWorkflowCapture(recordingId)) : json(response, 400, { error: 'Confirm login is complete and close any remaining password prompt before starting capture.' })
+    }
+    if (request.method === 'POST' && operation === 'pause') return pauseWorkflowCapture(recordingId) ? json(response, 200, getWorkflowCapture(recordingId)) : json(response, 409, { error: 'Capture is not currently active.' })
+    if (request.method === 'POST' && operation === 'resume') return resumeWorkflowCapture(recordingId) ? json(response, 200, getWorkflowCapture(recordingId)) : json(response, 409, { error: 'Capture cannot resume because it is not paused or the browser has closed.' })
+    if (request.method === 'POST' && operation === 'finish') {
+      try {
+        const body = await readJson(request)
+        return json(response, 200, await finishWorkflowCapture(recordingId, { reuseAuthenticatedSession: body.reuseAuthenticatedSession === true }))
+      } catch (error) { return json(response, 400, { error: sanitizedError(error) }) }
+    }
+    if (request.method === 'POST' && operation === 'save') {
+      try { return json(response, 200, await saveReviewedWorkflowCapture(recordingId, await readJson(request))) }
+      catch (error) { return json(response, 400, { error: sanitizedError(error) }) }
+    }
+    if (request.method === 'DELETE' && !operation) {
+      await cancelWorkflowCapture(recordingId)
+      return json(response, 200, { state: 'CANCELLED' })
     }
   }
 
@@ -657,16 +718,27 @@ const server = createServer(async (request, response) => {
       const applicationId = requiredString(body.applicationId, 'applicationId')
       const application = await getApplicationById(applicationId)
       if (!application || application.status !== 'Active') return json(response, 404, { error: 'An active registered application is required.' })
-      const parsed = parseTestCaseCsv(body.csvText)
+      let selectedWorkflow = null
+      if (body.workflowVersion !== undefined && body.workflowVersion !== null) {
+        const version = Number(body.workflowVersion)
+        if (!Number.isInteger(version) || version < 1) return json(response, 400, { error: 'Workflow version must be a positive integer.' })
+        selectedWorkflow = await getApplicationWorkflowVersion(applicationId, version)
+        if (!selectedWorkflow) return json(response, 409, { error: 'The selected workflow version is no longer available. Reload the application workflow and template.' })
+      }
+      const parsed = parseTestCaseCsv(body.csvText, selectedWorkflow ? { workflowVariables: selectedWorkflow.data_fields, workflowVersion: selectedWorkflow.workflow_version } : undefined)
       const rowErrors = []
       const existing = await findBrowserTestCaseKeys(applicationId, parsed.rows.map((row) => row.testCaseId).filter(Boolean))
       const existingKeys = new Set(existing.map((key) => key.toLowerCase()))
       const compiled = parsed.rows.map((row) => {
         const errors = [...row.errors]
+        if (selectedWorkflow && !workflowStepsMatch(row.rawSteps, selectedWorkflow.steps_text)) errors.push('CSV steps differ from the selected saved workflow version. Re-record or review the workflow before changing actions.')
         if (existingKeys.has(row.testCaseId.toLowerCase())) errors.push('This test case ID already exists for the selected application.')
         let plan = null
         if (!errors.length) {
-          try { plan = compileTestCase(row, application) } catch (error) { errors.push(error.message || 'Test steps could not be interpreted.') }
+          try {
+            plan = compileTestCase(row, application)
+            if (selectedWorkflow) applyReviewedWorkflowLocators(plan, selectedWorkflow)
+          } catch (error) { errors.push(error.message || 'Test steps could not be interpreted.') }
         }
         if (errors.length) rowErrors.push({ rowNumber: row.rowNumber, testCaseId: row.testCaseId || null, errors })
         return {
@@ -716,7 +788,7 @@ const server = createServer(async (request, response) => {
         priority: item.caseData.priority,
         tags: item.caseData.tags,
       }))
-      const suite = await importBrowserTestSuite({ id: suiteId, applicationId, name: safeName, sourceFilename, cases: testCases })
+      const suite = await importBrowserTestSuite({ id: suiteId, applicationId, name: safeName, sourceFilename, workflowVersion: selectedWorkflow?.workflow_version || null, cases: testCases })
       return json(response, 201, suite)
     } catch (error) {
       return phase1Error(response, error)
@@ -762,9 +834,12 @@ const server = createServer(async (request, response) => {
         captureScreenshotsOnFailure: body.captureScreenshotsOnFailure !== false,
         recordingPolicy: body.recordingPolicy === 'disabled' ? 'disabled' : 'mask-form-values',
         reuseAuthenticatedSession: body.reuseAuthenticatedSession === true,
+        allowWrites: body.allowWrites === true,
       }
       const requiresApproval = item.plan.actions.some((action) => action.requiresApproval === true)
       if (requiresApproval && body.approveInteractions !== true) return json(response, 403, { error: 'Explicit approval is required because this test contains interactive actions.' })
+      const hasWrites = item.plan.actions.some((action) => ['create', 'update', 'delete'].includes(action.action))
+      if (hasWrites && body.allowWrites !== true) return json(response, 403, { error: 'Enable and explicitly approve write actions for this run.' })
       const execution = await createBrowserTestExecution({
         id: randomUUID(),
         suiteId: item.suite_id,

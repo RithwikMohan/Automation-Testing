@@ -142,6 +142,33 @@ export async function initializeDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_browser_test_suites_app ON browser_test_suites(application_id, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS application_workflow_templates (
+      application_id TEXT PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+      workflow_name TEXT NOT NULL,
+      action_plan JSONB NOT NULL,
+      data_fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      steps_text TEXT NOT NULL DEFAULT '',
+      csv_template TEXT NOT NULL,
+      workflow_version INTEGER NOT NULL DEFAULT 1,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE application_workflow_templates ADD COLUMN IF NOT EXISTS steps_text TEXT NOT NULL DEFAULT '';
+    ALTER TABLE application_workflow_templates ADD COLUMN IF NOT EXISTS workflow_version INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE IF NOT EXISTS application_workflow_versions (
+      application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+      workflow_version INTEGER NOT NULL,
+      workflow_name TEXT NOT NULL,
+      action_plan JSONB NOT NULL,
+      data_fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+      steps_text TEXT NOT NULL DEFAULT '',
+      csv_template TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (application_id, workflow_version)
+    );
+    INSERT INTO application_workflow_versions (application_id, workflow_version, workflow_name, action_plan, data_fields, steps_text, csv_template, created_at)
+    SELECT application_id, workflow_version, workflow_name, action_plan, data_fields, steps_text, csv_template, updated_at
+    FROM application_workflow_templates ON CONFLICT (application_id, workflow_version) DO NOTHING;
+
     CREATE TABLE IF NOT EXISTS browser_test_cases (
       id TEXT PRIMARY KEY,
       suite_id TEXT NOT NULL REFERENCES browser_test_suites(id) ON DELETE CASCADE,
@@ -154,9 +181,11 @@ export async function initializeDatabase() {
       expected_result TEXT NOT NULL,
       priority TEXT NOT NULL DEFAULT 'normal',
       tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      workflow_version INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(application_id, case_key)
     );
+    ALTER TABLE browser_test_cases ADD COLUMN IF NOT EXISTS workflow_version INTEGER;
     CREATE INDEX IF NOT EXISTS idx_browser_test_cases_suite ON browser_test_cases(suite_id, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_test_case_key_application
       ON browser_test_cases(application_id, lower(case_key));
@@ -523,6 +552,71 @@ export async function getApplicationById(id) {
   }
 }
 
+export async function saveApplicationWorkflowTemplate({ applicationId, workflowName, actionPlan, dataFields, stepsText, csvTemplate, csvTemplateForVersion }) {
+  const database = getDatabasePool()
+  const client = database.connect ? await database.connect() : database
+  const transactional = client !== database
+  try {
+    if (transactional) await client.query('BEGIN')
+    if (transactional) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [applicationId])
+    const current = await client.query('SELECT workflow_version FROM application_workflow_templates WHERE application_id = $1 FOR UPDATE', [applicationId])
+    const workflowVersion = (Number(current.rows[0]?.workflow_version) || 0) + 1
+    const versionedCsv = typeof csvTemplateForVersion === 'function' ? csvTemplateForVersion(workflowVersion) : csvTemplate
+    const result = await client.query(
+      `INSERT INTO application_workflow_templates (application_id, workflow_name, action_plan, data_fields, steps_text, csv_template, workflow_version, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7, now())
+       ON CONFLICT (application_id) DO UPDATE SET workflow_name = EXCLUDED.workflow_name,
+         action_plan = EXCLUDED.action_plan, data_fields = EXCLUDED.data_fields, steps_text = EXCLUDED.steps_text,
+         csv_template = EXCLUDED.csv_template, workflow_version = EXCLUDED.workflow_version, updated_at = now()
+       RETURNING application_id, workflow_name, action_plan, data_fields, steps_text, csv_template, workflow_version, updated_at`,
+      [applicationId, workflowName, JSON.stringify(actionPlan), JSON.stringify(dataFields), stepsText, versionedCsv, workflowVersion],
+    )
+    const saved = result.rows[0]
+    await client.query(
+      `INSERT INTO application_workflow_versions (application_id, workflow_version, workflow_name, action_plan, data_fields, steps_text, csv_template)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)`,
+      [applicationId, saved.workflow_version, workflowName, JSON.stringify(actionPlan), JSON.stringify(dataFields), stepsText, versionedCsv],
+    )
+    if (transactional) await client.query('COMMIT')
+    return saved
+  } catch (error) {
+    if (transactional) await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    if (transactional) client.release()
+  }
+}
+
+export async function getApplicationWorkflowTemplate(applicationId) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT application_id, workflow_name, action_plan, data_fields, steps_text, csv_template, workflow_version, updated_at
+     FROM application_workflow_templates WHERE application_id = $1`,
+    [applicationId],
+  )
+  return result.rows[0] || null
+}
+
+export async function getApplicationWorkflowVersion(applicationId, workflowVersion) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT application_id, workflow_name, action_plan, data_fields, steps_text, csv_template, workflow_version, created_at AS updated_at
+     FROM application_workflow_versions WHERE application_id = $1 AND workflow_version = $2`,
+    [applicationId, workflowVersion],
+  )
+  return result.rows[0] || null
+}
+
+export async function listApplicationWorkflowVersions(applicationId) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT application_id, workflow_version, workflow_name, created_at
+     FROM application_workflow_versions WHERE application_id = $1 ORDER BY workflow_version DESC`,
+    [applicationId],
+  )
+  return result.rows
+}
+
 export async function updateApplication(id, updates) {
   const database = getDatabasePool()
   const client = database.connect ? await database.connect() : database
@@ -887,7 +981,7 @@ export async function getExplorationResultById(id) {
   return res.rows[0] || null
 }
 
-export async function importBrowserTestSuite({ id, applicationId, name, sourceFilename, cases }) {
+export async function importBrowserTestSuite({ id, applicationId, name, sourceFilename, workflowVersion = null, cases }) {
   const database = getDatabasePool()
   const client = await database.connect()
   try {
@@ -899,9 +993,9 @@ export async function importBrowserTestSuite({ id, applicationId, name, sourceFi
     for (const item of cases) {
       await client.query(
         `INSERT INTO browser_test_cases
-         (id, suite_id, application_id, case_key, name, preconditions, plan, test_data, expected_result, priority, tags)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [item.id, id, applicationId, item.caseKey, item.name, JSON.stringify(item.preconditions), JSON.stringify(item.plan), JSON.stringify(item.testData), item.expectedResult, item.priority, JSON.stringify(item.tags)],
+         (id, suite_id, application_id, case_key, name, preconditions, plan, test_data, expected_result, priority, tags, workflow_version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [item.id, id, applicationId, item.caseKey, item.name, JSON.stringify(item.preconditions), JSON.stringify(item.plan), JSON.stringify(item.testData), item.expectedResult, item.priority, JSON.stringify(item.tags), workflowVersion],
       )
     }
     await client.query('COMMIT')

@@ -18,17 +18,26 @@ function parseJsonField(value, fallback, label, errors) {
   }
 }
 
-export function parseTestCaseCsv(csvText) {
+export function parseTestCaseCsv(csvText, { workflowVariables, workflowVersion } = {}) {
   if (typeof csvText !== 'string' || !csvText.trim()) return { rows: [], errors: ['CSV content is empty.'] }
   if (csvText.length > 2_000_000) return { rows: [], errors: ['CSV content exceeds the 2 MB import limit.'] }
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: 'greedy', transformHeader: normalizeHeader })
   const fields = (parsed.meta.fields || []).map(normalizeHeader)
-  const missing = REQUIRED_HEADERS.filter((header) => !fields.includes(header))
+  const workflowMode = Array.isArray(workflowVariables)
+  const allowedCredentialKeys = new Set(workflowMode ? workflowVariables.filter((variable) => variable.credential === true && variable.key === 'password').map((variable) => variable.key) : [])
+  const requiredHeaders = workflowMode ? REQUIRED_HEADERS.filter((header) => header !== 'test_data') : REQUIRED_HEADERS
+  const missing = [...requiredHeaders.filter((header) => !fields.includes(header)), ...(workflowMode ? workflowVariables.filter((variable) => variable.variable !== false && !fields.includes(variable.key)).map((variable) => variable.key) : [])]
   const errors = []
   if (new Set(fields).size !== fields.length) return { rows: [], errors: ['CSV contains duplicate column headers after normalization.'] }
   if (missing.length) return { rows: [], errors: ['Missing required CSV columns: ' + missing.join(', ') + '.'] }
-  const credentialColumns = fields.filter((field) => SECRET_NAME.test(field))
+  const credentialColumns = fields.filter((field) => SECRET_NAME.test(field) && !allowedCredentialKeys.has(field))
   if (credentialColumns.length) return { rows: [], errors: ['Credential-like CSV columns are not accepted: ' + credentialColumns.join(', ') + '.'] }
+  if (workflowMode) {
+    const fixed = new Set([...REQUIRED_HEADERS, 'test_case_id', 'name', 'preconditions', 'steps', 'expected_result', 'priority', 'tags'])
+    const allowed = new Set([...fixed, ...workflowVariables.filter((variable) => variable.variable !== false).map((variable) => variable.key)])
+    const unexpected = fields.filter((field) => !allowed.has(field))
+    if (unexpected.length) errors.push('CSV contains columns not defined by the selected workflow: ' + unexpected.join(', ') + '.')
+  }
   if ((parsed.data || []).length > 500) errors.push('CSV imports are limited to 500 test cases.')
   for (const error of parsed.errors || []) errors.push('CSV row ' + (error.row + 2) + ': ' + error.message)
 
@@ -56,15 +65,26 @@ export function parseTestCaseCsv(csvText) {
     }
 
     const preconditions = parseJsonField(raw.preconditions, [], 'Preconditions', rowErrors)
-    const testData = parseJsonField(raw.test_data, {}, 'Test data', rowErrors)
+    const testData = workflowMode && !fields.includes('test_data')
+      ? Object.fromEntries(workflowVariables.filter((variable) => variable.variable !== false).map((variable) => [variable.key, String(raw[variable.key] ?? '')]))
+      : parseJsonField(raw.test_data, {}, 'Test data', rowErrors)
+    if (workflowMode && !fields.includes('test_data')) {
+      for (const variable of workflowVariables.filter((item) => item.variable !== false && item.required !== false)) {
+        if (!String(testData[variable.key] ?? '').trim()) rowErrors.push(`Required workflow field "${variable.label || variable.key}" is missing.`)
+      }
+    }
     if (!Array.isArray(preconditions) || preconditions.some((value) => typeof value !== 'string' || value.length > 500)) rowErrors.push('Preconditions must be a JSON array of short strings.')
     if (!testData || typeof testData !== 'object' || Array.isArray(testData)) rowErrors.push('Test data must be a JSON object.')
     else {
       if (Object.keys(testData).length > 50) rowErrors.push('Test data is limited to 50 named values.')
-      if (Object.keys(testData).some((key) => SECRET_NAME.test(key)) || Object.values(testData).some((value) => typeof value === 'string' && TOKEN_VALUE.test(value))) rowErrors.push('Test data cannot contain passwords, tokens, cookies, secrets, or API keys.')
+      if (Object.keys(testData).some((key) => SECRET_NAME.test(key) && !allowedCredentialKeys.has(key)) || Object.values(testData).some((value) => typeof value === 'string' && TOKEN_VALUE.test(value))) rowErrors.push('Test data may contain passwords, tokens, cookies, secrets, or API keys unless password is an explicitly reviewed workflow field.')
       if (Object.values(testData).some((value) => (typeof value !== 'string' && typeof value !== 'number') || typeof value === 'string' && value.length > 2000)) rowErrors.push('Test data values must be strings or numbers up to 2,000 characters.')
     }
     const tags = String(raw.tags || '').split(/[;,]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 20)
+    if (workflowMode && workflowVersion) {
+      const embeddedVersion = tags.map((tag) => tag.match(/^workflow-v(\d+)$/i)).find(Boolean)?.[1]
+      if (embeddedVersion && Number(embeddedVersion) !== workflowVersion) rowErrors.push(`CSV workflow version ${embeddedVersion} does not match selected version ${workflowVersion}.`)
+    }
     return { rowNumber, testCaseId, name, preconditions, rawSteps: steps, testData, expectedResult, priority, tags, errors: rowErrors }
   })
   return { rows, errors }

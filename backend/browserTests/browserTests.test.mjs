@@ -97,6 +97,36 @@ test('CSV parser reports missing headers and malformed JSON row errors', () => {
   assert.ok(result.rows[0].errors.some((item) => /Preconditions must contain valid JSON/.test(item)))
 })
 
+test('workflow CSV parser binds dynamic fields to the saved version and rejects missing or unexpected columns', () => {
+  const workflowVariables = [{ key: 'first_name', label: 'First Name', required: true, variable: true }]
+  const csv = 'test_case_id,name,preconditions,steps,first_name,expected_result,priority,tags\n' +
+    'TC-1,Create user,[],"fill label=""First Name"" <- ${test_data.first_name}",Asha,"assert visible text=""User created""",normal,workflow-v2'
+  const parsed = parseTestCaseCsv(csv, { workflowVariables, workflowVersion: 2 })
+  assert.deepEqual(parsed.errors, [])
+  assert.deepEqual(parsed.rows[0].testData, { first_name: 'Asha' })
+  assert.deepEqual(parsed.rows[0].errors, [])
+  const missing = parseTestCaseCsv(csv.replace(',Asha,', ',,'), { workflowVariables, workflowVersion: 2 })
+  assert.ok(missing.rows[0].errors.some((item) => /Required workflow field/.test(item)))
+  const oldVersion = parseTestCaseCsv(csv.replace('workflow-v2', 'workflow-v1'), { workflowVariables, workflowVersion: 2 })
+  assert.ok(oldVersion.rows[0].errors.some((item) => /does not match selected version/.test(item)))
+  const extra = parseTestCaseCsv(csv.replace('first_name,expected_result', 'first_name,unexpected,expected_result'), { workflowVariables, workflowVersion: 2 })
+  assert.ok(extra.errors.some((item) => /not defined by the selected workflow/.test(item)))
+  const credentialVariables = [
+    { key: 'username', label: 'Username', required: true, variable: true },
+    { key: 'password', label: 'Password', required: true, variable: true, credential: true, sensitive: true },
+  ]
+  const loginCsv = 'test_case_id,name,preconditions,steps,username,password,expected_result,priority,tags\n' +
+    'TC-LOGIN,Login,[],"fill label=""Username"" <- ${test_data.username}\nfill label=""Password"" <- ${test_data.password}\nclick role=button[name=""Sign In""]",user1,PlainTextPassword123!,"assert url contains ""/home""",normal,workflow-v1'
+  const loginParsed = parseTestCaseCsv(loginCsv, { workflowVariables: credentialVariables, workflowVersion: 1 })
+  assert.deepEqual(loginParsed.errors, [])
+  assert.deepEqual(loginParsed.rows[0].testData, { username: 'user1', password: 'PlainTextPassword123!' })
+  assert.deepEqual(loginParsed.rows[0].errors, [])
+  const apiKeyVariables = [...credentialVariables, { key: 'api_key', label: 'API key', required: true, variable: true }]
+  const apiKeyCsv = loginCsv.replace('password,expected_result', 'password,api_key,expected_result').replace('PlainTextPassword123!,"assert', 'PlainTextPassword123!,should-not-be-allowed,"assert')
+  const apiKeyParsed = parseTestCaseCsv(apiKeyCsv, { workflowVariables: apiKeyVariables, workflowVersion: 1 })
+  assert.ok(apiKeyParsed.errors.some((item) => /Credential-like CSV columns/.test(item)))
+})
+
 test('Rule interpreter produces versioned structured plans and validates test data references', () => {
   const plan = compileTestCase({
     rawSteps: 'navigate: /profile\nfill label="Email" <- ${test_data.email}\nclick role=button[name="Continue"]\nread text="Result" as result',
@@ -162,6 +192,13 @@ test('Rule interpreter recognizes button-named synonym and approved explicit dro
   assert.equal(plan.actions[1].requiresApproval, true)
 })
 
+test('Rule interpreter accepts stable captured id and name locators', () => {
+  const plan = compileTestCase({ rawSteps: 'fill id="first_name" <- ${test_data.first_name}\nclick name="save_button"', expectedResult: 'assert visible text="Saved"', testData: { first_name: 'Asha' } }, app)
+  assert.deepEqual(plan.actions.map((action) => action.action), ['fill', 'click', 'assert_visible'])
+  assert.deepEqual(plan.actions[0].locator, { kind: 'id', value: 'first_name' })
+  assert.deepEqual(plan.actions[1].locator, { kind: 'name', value: 'save_button' })
+})
+
 test('Rule registry rejects missing required assertions and persisted unknown action types', async () => {
   assert.throws(() => compileTestCase({ rawSteps: 'navigate: /home', expectedResult: '', testData: {} }, app), /Expected result must include at least one meaningful assertion/)
   const unsafeCase = {
@@ -188,6 +225,27 @@ test('Rule interpreter validates explicitly approved writes and requires a follo
   assert.throws(() => compileTestCase({ rawSteps: 'navigate: /home', expectedResult: '', testData: {} }, app), /meaningful assertion/)
 })
 
+test('execution requires an explicit write-mode choice before launching a reviewed write plan', async (t) => {
+  const pool = new ExecutionMemoryPool()
+  setDatabasePoolForTesting(pool)
+  t.after(() => setDatabasePoolForTesting(null))
+  const id = 'write-mode-explicit'
+  pool.cases.set(id, {
+    id, suite_id: 'suite-1', application_id: 'app-1', application_name: 'Fixture App',
+    application_base_url: 'https://app.example.test/', application_status: 'Active', application_auth_method: 'none',
+    application_login_url: null, approved_navigation_origins: [], approved_resource_origins: [], test_data: {},
+    expected_result: 'assert visible text="Saved"',
+    plan: { version: '1.0', actions: [
+      { action: 'update', locator: { kind: 'role', role: 'button', name: 'Save' }, requiresApproval: true, requiresWriteApproval: true, writeAuthorization: { captured: true, operation: 'update', method: 'POST', origin: 'https://app.example.test', path: '/save' } },
+      { action: 'assert_visible', locator: { kind: 'text', value: 'Saved' }, expected: 'Saved' },
+    ] },
+  })
+  pool.executions.set(id, { id })
+  await executeBrowserTest({ id, caseId: id, approvedInteractions: true }, { recordArtifacts: false })
+  assert.equal(pool.executions.get(id).status, 'BLOCKED')
+  assert.equal(pool.executions.get(id).error_code, 'WRITE_MODE_REQUIRED')
+})
+
 test('Rule interpreter rejects unknown instructions, unsafe schemes, ambiguous locators, and URL secrets while allowing public navigation', () => {
   assert.throws(() => compileTestCase({ rawSteps: 'run javascript alert(1)', expectedResult: 'assert url contains "/"', testData: {} }, app), /unsupported instruction/)
   const publicNavigation = compileTestCase({ rawSteps: 'navigate: https://public.example.test/help', expectedResult: 'assert url contains "/help"', testData: {} }, app)
@@ -202,7 +260,7 @@ test('Database migration adds isolated suite, case, execution, step, and artifac
   let schema = ''
   setDatabasePoolForTesting({ async query(sql) { schema = sql; return { rows: [] } } })
   await initializeDatabase()
-  for (const table of ['browser_test_suites', 'browser_test_cases', 'browser_test_executions', 'browser_test_step_results', 'browser_test_artifacts']) {
+  for (const table of ['application_workflow_templates', 'application_workflow_versions', 'browser_test_suites', 'browser_test_cases', 'browser_test_executions', 'browser_test_step_results', 'browser_test_artifacts']) {
     assert.match(schema, new RegExp('CREATE TABLE IF NOT EXISTS ' + table))
   }
   assert.match(schema, /CREATE TABLE IF NOT EXISTS applications/)
@@ -213,15 +271,18 @@ test('Database migration adds isolated suite, case, execution, step, and artifac
   assert.match(schema, /execution_options JSONB NOT NULL DEFAULT '\{\}'::jsonb/)
   assert.match(schema, /video_status TEXT NOT NULL DEFAULT 'NOT_REQUESTED'/)
   assert.match(schema, /'CANCELLED'/)
+  assert.match(schema, /ADD COLUMN IF NOT EXISTS steps_text/)
+  assert.match(schema, /ADD COLUMN IF NOT EXISTS workflow_version/)
 })
 
 test('Suite imports are transactional and roll back when duplicate case IDs hit persistence constraints', async () => {
   const pool = new ImportMemoryPool()
   setDatabasePoolForTesting(pool)
   const cases = [{ id: 'case-1', caseKey: 'TC-1', name: 'Home', preconditions: [], plan: { version: '1.0', actions: [] }, testData: {}, expectedResult: 'assert url contains "/"', priority: 'normal', tags: [] }]
-  const suite = await importBrowserTestSuite({ id: 'suite-1', applicationId: 'app-1', name: 'Smoke', sourceFilename: 'smoke.csv', cases })
+  const suite = await importBrowserTestSuite({ id: 'suite-1', applicationId: 'app-1', name: 'Smoke', sourceFilename: 'smoke.csv', workflowVersion: 2, cases })
   assert.equal(suite.case_count, 1)
   assert.ok(pool.statements.includes('COMMIT'))
+  assert.equal(pool.cases[0][11], 2)
   pool.duplicate = true
   await assert.rejects(importBrowserTestSuite({ id: 'suite-2', applicationId: 'app-1', name: 'Duplicate', cases }), (error) => error.code === '23505')
   assert.equal(pool.statements.at(-1), 'ROLLBACK')
@@ -303,8 +364,13 @@ test('Playwright execution verifies assertions, records optional policy blocks, 
     ] }
     pool.cases.set('case-create', writeCase)
     pool.executions.set('exec-create', { id: 'exec-create' })
-    await executeBrowserTest({ id: 'exec-create', caseId: 'case-create', approvedInteractions: true }, { ...settings, recordArtifacts: false })
+    await executeBrowserTest({ id: 'exec-create', caseId: 'case-create', approvedInteractions: true }, { ...settings, allowWrites: true, recordArtifacts: false })
     assert.equal(pool.executions.get('exec-create').status, 'PASSED', JSON.stringify(pool.executions.get('exec-create')))
+    assert.equal(writeCount, 1)
+    pool.executions.set('exec-create-write-mode-disabled', { id: 'exec-create-write-mode-disabled' })
+    await executeBrowserTest({ id: 'exec-create-write-mode-disabled', caseId: 'case-create', approvedInteractions: true }, { ...settings, recordArtifacts: false })
+    assert.equal(pool.executions.get('exec-create-write-mode-disabled').status, 'BLOCKED')
+    assert.equal(pool.executions.get('exec-create-write-mode-disabled').error_code, 'WRITE_MODE_REQUIRED')
     assert.equal(writeCount, 1)
     pool.cases.set('case-create-unapproved', { ...writeCase, id: 'case-create-unapproved' })
     pool.executions.set('exec-create-unapproved', { id: 'exec-create-unapproved' })

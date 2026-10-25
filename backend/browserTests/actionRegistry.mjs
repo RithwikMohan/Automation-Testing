@@ -7,7 +7,7 @@ export const ACTION_RULES = Object.freeze({
   create: ['locator'], update: ['locator'], delete: ['locator'],
 })
 
-const LOCATOR_KINDS = new Set(['role', 'text', 'label', 'placeholder', 'testid', 'css'])
+const LOCATOR_KINDS = new Set(['role', 'text', 'label', 'placeholder', 'testid', 'css', 'id', 'name'])
 const ASSERTION_ACTIONS = new Set(['assert_visible', 'assert_text', 'assert_url', 'assert_value', 'assert_count_gt'])
 
 export function validateActionPlan(plan, testData = {}) {
@@ -20,12 +20,29 @@ export function validateActionPlan(plan, testData = {}) {
     if (required.some((key) => action[key] === undefined || action[key] === null)) {
       throw Object.assign(new Error('The saved "' + action.action + '" action is missing required parameters.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }
-    if (action.locator && (!LOCATOR_KINDS.has(action.locator.kind) || typeof (action.locator.value || action.locator.name) !== 'string')) {
+    if (action.locator && (!LOCATOR_KINDS.has(action.locator.kind) || typeof (action.locator.value || action.locator.name) !== 'string' || (action.locator.value || action.locator.name).length > 160)) {
       throw Object.assign(new Error('The saved action contains an invalid locator.'), { code: 'INVALID_ACTION_PARAMETERS' })
+    }
+    if (action.locatorCandidates !== undefined && (!Array.isArray(action.locatorCandidates) || action.locatorCandidates.length < 1 || action.locatorCandidates.length > 8 || action.locatorCandidates.some((candidate) => !candidate || !LOCATOR_KINDS.has(candidate.kind) || typeof (candidate.value || candidate.name) !== 'string' || (candidate.value || candidate.name).length > 160))) {
+      throw Object.assign(new Error('The saved action contains invalid locator candidates.'), { code: 'INVALID_ACTION_PARAMETERS' })
+    }
+    if (action.writeAuthorization !== undefined) {
+      const auth = action.writeAuthorization
+      let origin
+      try { origin = new URL(auth.origin).origin } catch {}
+      if (!['create', 'update', 'delete'].includes(action.action) || auth.captured !== true || auth.operation !== action.action || auth.method !== 'POST' || !origin || origin !== auth.origin || typeof auth.path !== 'string' || !auth.path.startsWith('/') || /[?#]/.test(auth.path)) throw Object.assign(new Error('The saved action contains invalid registered form authorization.'), { code: 'INVALID_ACTION_PARAMETERS' })
+    }
+    if (action.postbackAuthorization !== undefined) {
+      const auth = action.postbackAuthorization
+      let origin
+      try { origin = new URL(auth.origin).origin } catch {}
+      if (action.action !== 'click' || auth.captured !== true || auth.method !== 'POST' || !origin || origin !== auth.origin || typeof auth.path !== 'string' || !auth.path.startsWith('/') || /[?#]/.test(auth.path)) throw Object.assign(new Error('The saved action contains invalid registered form postback authorization.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }
     if (action.dataKey && !Object.hasOwn(testData, action.dataKey)) {
       throw Object.assign(new Error('The saved action references missing test data.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }
+    if (action.credentialInput === true && (action.action !== 'fill' || action.dataKey !== 'password' || typeof testData.password !== 'string')) throw Object.assign(new Error('The saved plan contains invalid password-field input metadata.'), { code: 'INVALID_ACTION_PARAMETERS' })
+    if (action.manualLoginSubmit === true && action.action !== 'click') throw Object.assign(new Error('The saved plan contains invalid login-submit metadata.'), { code: 'INVALID_ACTION_PARAMETERS' })
     if (action.action === 'select' && Boolean(action.dataKey) === Boolean(action.optionLabel)) {
       throw Object.assign(new Error('Select requires exactly one test data reference or explicit option label.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }

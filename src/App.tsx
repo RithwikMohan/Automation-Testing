@@ -504,6 +504,81 @@ function ExplorationModal({ app, onClose }: { app: Application | null; onClose: 
   )
 }
 
+type WorkflowCapture = { id: string; state: string; currentUrl?: string; workflowName?: string; actions?: Array<{ action: string; url?: string; locator?: { kind: string; role?: string; name?: string; value?: string }; locatorCandidates?: Array<{ kind: string; role?: string; name?: string; value?: string }>; dataKey?: string; credentialInput?: boolean; manualLoginSubmit?: boolean; sequence?: number; pageUrl?: string; element?: { tag?: string; inputType?: string } }>; fields?: Array<{ key: string; label: string; type: string; required?: boolean; credential?: boolean }>; diagnostics?: Array<string> }
+function WorkflowCaptureModal({ app, onClose, onSaved }: { app: Application; onClose: () => void; onSaved: () => void }) {
+  const [capture, setCapture] = useState<WorkflowCapture | null>(null)
+  const captureIdRef = useRef<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [targetUrl, setTargetUrl] = useState(app.base_url)
+  const [reuseSession, setReuseSession] = useState(false)
+  const [reviewName, setReviewName] = useState('')
+  const [reviewActions, setReviewActions] = useState<Array<{ captureIndex: number; include: boolean; locatorCandidateIndex: number }>>([])
+  const [reviewVariables, setReviewVariables] = useState<Array<{ captureKey: string; key: string; label: string; required: boolean; include: boolean; credential?: boolean }>>([])
+  useEffect(() => {
+    let disposed = false
+    let timer: number | undefined
+    const poll = async (id: string) => {
+      try {
+        const response = await fetch(`${API}/api/workflow-recordings/${id}`)
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'Unable to read workflow recording.')
+        if (!disposed) { setCapture(data); timer = window.setTimeout(() => poll(id), 1000) }
+      } catch (cause) { if (!disposed) setError(cause instanceof Error ? cause.message : 'Unable to read workflow recording.') }
+    }
+    setBusy(true)
+    fetch(`${API}/api/applications/${app.id}/workflow-recordings`, { method: 'POST' })
+      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Unable to open recording browser.'); return data })
+      .then((data) => { if (disposed) { fetch(`${API}/api/workflow-recordings/${data.id}`, { method: 'DELETE' }).catch(() => {}); return } captureIdRef.current = data.id; setCapture(data); poll(data.id) })
+      .catch((cause) => { if (!disposed) setError(cause instanceof Error ? cause.message : 'Unable to start workflow capture.') })
+      .finally(() => { if (!disposed) setBusy(false) })
+    return () => { disposed = true; if (timer) window.clearTimeout(timer); if (captureIdRef.current) fetch(`${API}/api/workflow-recordings/${captureIdRef.current}`, { method: 'DELETE' }).catch(() => {}) }
+  }, [app.id])
+  const begin = async () => {
+    if (!capture) return
+    setBusy(true); setError('')
+    try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/begin`, { method: 'POST' }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not begin capture.'); setCapture(data) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not begin capture.') } finally { setBusy(false) }
+  }
+  const openTarget = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!capture) return
+    setBusy(true); setError('')
+    try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/navigate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: targetUrl }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not open that URL.'); setCapture(data) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not open that URL.') } finally { setBusy(false) }
+  }
+  const setCaptureState = async (operation: 'pause' | 'resume') => {
+    if (!capture) return
+    setBusy(true); setError('')
+    try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/${operation}`, { method: 'POST' }); const data = await response.json(); if (!response.ok) throw new Error(data.error || `Could not ${operation} capture.`); setCapture(data) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : `Could not ${operation} capture.`) } finally { setBusy(false) }
+  }
+  const finish = async () => {
+    if (!capture) return
+    setBusy(true); setError('')
+    try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/finish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reuseAuthenticatedSession: reuseSession }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not finish capture.'); setCapture(data); setReviewName(data.workflowName || `${app.name} recorded workflow`); setReviewActions((data.actions || []).map((_action: WorkflowCapture['actions'] extends Array<infer T> ? T : never, captureIndex: number) => ({ captureIndex, include: true, locatorCandidateIndex: 0 }))); setReviewVariables((data.fields || []).map((field: { key: string; label: string; required?: boolean; credential?: boolean }) => ({ captureKey: field.key, key: field.key, label: field.label, required: field.required !== false, include: true, credential: field.credential }))) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save workflow.') } finally { setBusy(false) }
+  }
+  const saveReview = async () => {
+    if (!capture) return
+    setBusy(true); setError('')
+    try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/save`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: reviewName, actions: reviewActions, variables: reviewVariables }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not save workflow.'); captureIdRef.current = null; onSaved(); onClose() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save workflow.') } finally { setBusy(false) }
+  }
+  const cancel = async () => { if (captureIdRef.current) { const id = captureIdRef.current; captureIdRef.current = null; await fetch(`${API}/api/workflow-recordings/${id}`, { method: 'DELETE' }).catch(() => {}) } onClose() }
+  return <div className="modal-backdrop" onClick={cancel}><motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="modal-panel card" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-heading"><div><div className="eyebrow">WORKFLOW RECORDER</div><h2>Record {app.name}</h2></div><button className="icon-button" onClick={cancel}><X size={18} /></button></div>
+    {error && <div className="info-banner info-banner-error"><AlertTriangle size={15} /><span>{error}</span></div>}
+    <p>Open a public website here or follow links in the capture browser. Public HTTP(S) pages and their resources are checked through the security proxy; private/internal destinations still require explicit application approval. Chronos records field names and locators, never values typed during capture. A password CSV column can be included; values later added to that CSV are stored as test data and must be protected accordingly.</p>
+    {capture && capture.state !== 'REVIEW_REQUIRED' && <form onSubmit={openTarget} className="workflow-target-navigation"><label htmlFor="workflow-target-url">Open URL in capture browser</label><div><input id="workflow-target-url" type="url" value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://example.com" /><button className="button button-secondary" type="submit" disabled={busy}>Open</button></div></form>}
+    {capture?.state === 'WAITING_FOR_MANUAL_LOGIN' && <><div className="browser-test-auth-prompt"><strong>Capture is recording the login workflow.</strong><span>Sign in in the browser, then return here and choose Continue capture after login. Values typed during capture are not stored; the reviewed workflow may add blank username/password columns to the CSV.</span><button className="button button-primary" disabled={busy} onClick={begin}>Continue capture after login</button></div><ol>{capture.actions?.map((action, index) => <li key={index}>{action.sequence || index + 1}. {action.action} · {action.url ? new URL(action.url).pathname : action.locator ? action.locator.name || action.locator.value || action.locator.kind : 'page transition'}{action.dataKey ? ` → ${action.dataKey}` : ''}</li>)}</ol>{capture.diagnostics?.map((diagnostic, index) => <div className="exploration-warning-box" key={index}>{diagnostic}</div>)}</>}
+    {(capture?.state === 'CAPTURING' || capture?.state === 'PAUSED') && <><p><strong>{capture.state === 'PAUSED' ? 'Capture paused.' : 'Capture active.'}</strong> Complete the representative workflow, then review it.</p><ol>{capture.actions?.map((action, index) => <li key={index}>{action.sequence || index + 1}. {action.action} · {action.url ? new URL(action.url).pathname : action.locator ? action.locator.name || action.locator.value || action.locator.kind : 'page transition'}{action.dataKey ? ` → ${action.dataKey}` : ''}{action.element?.tag ? ` · ${action.element.tag}` : ''}</li>)}</ol>{capture.diagnostics?.map((diagnostic, index) => <div className="exploration-warning-box" key={index}>{diagnostic}</div>)}<div style={{ display: 'flex', gap: 8 }}><button className="button button-secondary" disabled={busy} onClick={() => setCaptureState(capture.state === 'PAUSED' ? 'resume' : 'pause')}>{capture.state === 'PAUSED' ? 'Resume capture' : 'Pause capture'}</button><button className="button button-primary" disabled={busy || !capture.actions?.length} onClick={finish}>{busy ? 'Finishing…' : 'Finish and review workflow'}</button></div><label className="browser-test-approve-check"><input type="checkbox" checked={reuseSession} onChange={(event) => setReuseSession(event.target.checked)} /> Keep this approved manual login available for test runs for 15 minutes (memory only)</label></>}
+    {capture?.state === 'REVIEW_REQUIRED' && <><label>Workflow name<input value={reviewName} maxLength={120} onChange={(event) => setReviewName(event.target.value)} /></label><h3>Review captured actions</h3><div className="workflow-review-list">{reviewActions.map((review, index) => { const action = capture.actions?.[review.captureIndex]; if (!action) return null; return <div className="workflow-review-row" key={review.captureIndex}><label><input type="checkbox" checked={review.include} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, include: event.target.checked } : item))} /> {action.sequence || index + 1}. {action.action}{action.credentialInput ? ' · password field (value not captured)' : action.manualLoginSubmit ? ' · manual login submit' : ''}</label><span>{action.element?.tag || 'element'}{action.pageUrl ? ` · ${new URL(action.pageUrl).pathname}` : action.url ? ` · ${new URL(action.url).pathname}` : ''}</span>{action.action !== 'navigate' && <select aria-label={`Locator for action ${review.captureIndex + 1}`} value={review.locatorCandidateIndex} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, locatorCandidateIndex: Number(event.target.value) } : item))}>{(action.locatorCandidates || (action.locator ? [action.locator] : [])).map((candidate, candidateIndex) => <option key={candidateIndex} value={candidateIndex}>{candidate.kind}: {candidate.name || candidate.value}</option>)}</select>}</div>})}</div><h3>CSV variables</h3>{reviewVariables.map((variable, index) => <div className="workflow-review-row" key={variable.captureKey}><label><input type="checkbox" checked={variable.include} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, include: event.target.checked } : item))} /> Include field</label><input aria-label="CSV column name" disabled={variable.credential} value={variable.key} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, key: event.target.value } : item))} /><input aria-label="Field label" value={variable.label} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, label: event.target.value } : item))} /><label><input type="checkbox" checked={variable.required} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, required: event.target.checked } : item))} /> Required</label></div>)}<div className="field-hint">Password values are not captured. If included, the downloaded CSV contains a blank password column that you fill in yourself.</div><button className="button button-primary" disabled={busy} onClick={saveReview}>{busy ? 'Saving…' : 'Save workflow and generate CSV'}</button></>}
+    {busy && !capture && <p>Opening isolated browser…</p>}
+    <button className="button button-secondary" onClick={cancel} style={{ marginLeft: 8 }}>Cancel</button>
+  </motion.div></div>
+}
+
 function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
   const [apps, setApps] = useState<Application[]>([])
   const [loading, setLoading] = useState(true)
@@ -515,6 +590,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
   const [editApp, setEditApp] = useState<Application | null>(null)
   const [detailApp, setDetailApp] = useState<Application | null>(null)
   const [exploreApp, setExploreApp] = useState<Application | null>(null)
+  const [captureApp, setCaptureApp] = useState<Application | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000) }
@@ -616,6 +692,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
               <div className="app-footer">
                 <span className="app-date">Updated {new Date(app.updated_at).toLocaleDateString()}</span>
                 <div style={{ display: 'flex', gap: 10 }}>
+                  <button className="text-button" onClick={() => setCaptureApp(app)}><Play size={12} style={{ marginRight: 3 }} /> Record workflow</button>
                   <button className="text-button" onClick={() => setExploreApp(app)}><Compass size={12} style={{ marginRight: 3 }} /> Inspect</button>
                   <button className="text-button" onClick={() => { navigate('create-automation') }}>+ New task</button>
                 </div>
@@ -686,6 +763,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
           />
         )}
       </AnimatePresence>
+      <AnimatePresence>{captureApp && <WorkflowCaptureModal app={captureApp} onClose={() => setCaptureApp(null)} onSaved={() => showToast('Workflow saved. Download its CSV template in Rule-Based Tests.')} />}</AnimatePresence>
     </motion.div>
   )
 }
@@ -1815,6 +1893,8 @@ function OracleHcmHiringPage() {
 }
 
 type BrowserTestApp = { id: string; name: string; base_url: string }
+type RecordedWorkflowTemplate = { workflow_name: string; workflow_version: number; action_plan: Array<{ action: string; locator?: { name?: string; value?: string; kind?: string }; dataKey?: string }>; data_fields: Array<{ key: string; label: string; type: string }>; csv_template: string }
+type WorkflowVersionSummary = { workflow_version: number; workflow_name: string; created_at: string }
 type BrowserTestSuite = { id: string; name: string; application_name: string; case_count: number; created_at: string }
 type BrowserTestCase = { id: string; case_key: string; name: string; priority: string; tags: string[]; plan: { version: string; actions: Array<{ action: string; requiresApproval?: boolean; requiresWriteApproval?: boolean; locator?: { kind: string; name?: string; value?: string } }> }; test_data_keys: string[]; expected_result: string }
 type BrowserTestExecution = { id: string; status: string; case_id: string; case_key: string; case_name: string; suite_name: string; application_name: string; created_at?: string; actual_outcome?: string; error_code?: string; error_details?: string; video_status?: string; video_error?: string; policy_warnings?: Array<{ reasonCode: string; hostname?: string; category?: string }>; diagnostics?: Array<{ type: string; stage?: string; blockingComponent?: string; failureSource?: string; responseSource?: string; isMainFrameNavigation?: boolean; method?: string; origin?: string | null; path?: string | null; status?: number; resourceType?: string; message?: string; error?: string; reason?: string; hostname?: string; reasonCode?: string }>; steps?: Array<{ id: number; step_number: number; action: string; status: string; expected?: unknown; actual?: unknown; error_code?: string; error_details?: string }>; artifacts?: Array<{ id: string; kind: string; content_type: string }> }
@@ -1844,6 +1924,10 @@ function BrowserTestsPage() {
   const [runOptions, setRunOptions] = useState({ defaultTimeoutMs: 10000, recordVideo: true, captureScreenshotsOnFailure: true, stopOnFailure: false, recordingPolicy: 'mask-form-values', reuseAuthenticatedSession: false })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [workflowTemplate, setWorkflowTemplate] = useState<RecordedWorkflowTemplate | null>(null)
+  const [workflowCsvDraft, setWorkflowCsvDraft] = useState('')
+  const [workflowVersions, setWorkflowVersions] = useState<WorkflowVersionSummary[]>([])
+  const [previewWorkflowVersion, setPreviewWorkflowVersion] = useState<number | null>(null)
 
   const refresh = async () => {
     const [appResponse, suiteResponse, runResponse] = await Promise.all([
@@ -1857,6 +1941,31 @@ function BrowserTestsPage() {
     if (!applicationId && appData[0]) setApplicationId(appData[0].id)
   }
   useEffect(() => { refresh().catch((error) => setMessage(error.message)) }, [])
+  useEffect(() => {
+    setWorkflowTemplate(null)
+    setWorkflowCsvDraft('')
+    setWorkflowVersions([])
+    if (!applicationId) return
+    let active = true
+    Promise.all([
+      fetch(API + '/api/applications/' + applicationId + '/workflow-template').then((response) => response.ok ? response.json() : null),
+      fetch(API + '/api/applications/' + applicationId + '/workflow-versions').then((response) => response.ok ? response.json() : []),
+    ]).then(([data, versions]) => { if (active) { setWorkflowTemplate(data); setWorkflowCsvDraft(data?.csv_template || ''); setWorkflowVersions(versions) } })
+      .catch(() => { if (active) { setWorkflowTemplate(null); setWorkflowVersions([]) } })
+    return () => { active = false }
+  }, [applicationId])
+
+  const loadWorkflowVersion = async (version: number) => {
+    if (!applicationId) return
+    setBusy(true); setMessage('')
+    try {
+      const response = await fetch(API + '/api/applications/' + applicationId + '/workflow-template?version=' + version)
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Unable to load that workflow version.')
+      setWorkflowTemplate(data); setWorkflowCsvDraft(data.csv_template); setPreview([]); setPreviewWorkflowVersion(null)
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to load workflow version.') }
+    finally { setBusy(false) }
+  }
 
   const chooseSuite = async (id: string) => {
     setSuiteId(id)
@@ -1868,16 +1977,17 @@ function BrowserTestsPage() {
     if (!response.ok) throw new Error('Unable to load cases for this suite.')
     setCases(await response.json())
   }
-  const previewFile = async (file?: File) => {
-    if (!file) return
+  const previewCsvText = async (text: string, filename: string) => {
     setBusy(true); setMessage(''); setPreview([]); setPreviewErrors([]); setSelectedPreviewIds([])
     try {
-      if (file.size > 2_000_000) throw new Error('CSV file must be 2 MB or smaller.')
-      const text = await file.text()
-      setFileName(file.name); setSuiteName(file.name.replace(/\.csv$/i, '')); setCsvText(text)
+      if (text.length > 2_000_000) throw new Error('CSV file must be 2 MB or smaller.')
+      setFileName(filename); setSuiteName(filename.replace(/\.csv$/i, '')); setCsvText(text)
+      const normalizedHeaders = (Papa.parse<string[]>(text, { skipEmptyLines: true }).data[0] || []).map((header) => String(header).trim().toLowerCase().replace(/[\s-]+/g, '_'))
+      const selectedVersion = workflowTemplate && !normalizedHeaders.includes('test_data') ? workflowTemplate.workflow_version : null
+      setPreviewWorkflowVersion(selectedVersion)
       const response = await fetch(API + '/api/browser-tests/import/preview', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ applicationId, filename: file.name, csvText: text }),
+        body: JSON.stringify({ applicationId, filename, csvText: text, workflowVersion: selectedVersion }),
       })
       const data = await response.json()
       setPreview(data.rows || [])
@@ -1887,12 +1997,17 @@ function BrowserTestsPage() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'CSV preview failed.') }
     finally { setBusy(false) }
   }
+  const previewFile = async (file?: File) => {
+    if (!file) return
+    if (file.size > 2_000_000) { setMessage('CSV file must be 2 MB or smaller.'); return }
+    await previewCsvText(await file.text(), file.name)
+  }
   const importSuite = async () => {
     setBusy(true); setMessage('')
     try {
       const response = await fetch(API + '/api/browser-tests/import', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ applicationId, filename: fileName, name: suiteName || fileName, csvText, selectedCaseIds: selectedPreviewIds }),
+        body: JSON.stringify({ applicationId, filename: fileName, name: suiteName || fileName, csvText, selectedCaseIds: selectedPreviewIds, workflowVersion: previewWorkflowVersion }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || 'Import failed.')
@@ -1910,11 +2025,11 @@ function BrowserTestsPage() {
     setSelectedExecution(data)
     return data as BrowserTestExecution
   }
-  const runCase = async (item: BrowserTestCase, approved: boolean): Promise<string> => {
+  const runCase = async (item: BrowserTestCase, approved: boolean, allowWrites = false): Promise<string> => {
     setBusy(true); setMessage('')
     try {
       const response = await fetch(API + '/api/browser-tests/cases/' + item.id + '/execute', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved, defaultTimeoutMs: runOptions.defaultTimeoutMs, recordVideo: runOptions.recordVideo && !recordingDisabledCaseIds.includes(item.id), recordingPolicy: runOptions.recordingPolicy, reuseAuthenticatedSession: runOptions.reuseAuthenticatedSession, captureScreenshotsOnFailure: runOptions.captureScreenshotsOnFailure }),
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved, allowWrites, defaultTimeoutMs: runOptions.defaultTimeoutMs, recordVideo: runOptions.recordVideo && !recordingDisabledCaseIds.includes(item.id), recordingPolicy: runOptions.recordingPolicy, reuseAuthenticatedSession: runOptions.reuseAuthenticatedSession, captureScreenshotsOnFailure: runOptions.captureScreenshotsOnFailure }),
       })
       const started = await response.json()
       if (!response.ok) throw new Error(started.error || 'Could not start this test.')
@@ -1976,7 +2091,7 @@ function BrowserTestsPage() {
     setApprovalCase(null)
     setApprovalChecked(false)
     setQueuedCases([])
-    const status = await runCase(approvedCase, true)
+    const status = await runCase(approvedCase, true, approvalHasWrites)
     if (runOptions.stopOnFailure && ['FAILED', 'BLOCKED'].includes(status)) {
       for (const pending of remaining) {
         const response = await fetch(API + '/api/browser-tests/cases/' + pending.id + '/skip', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'Skipped after ' + approvedCase.case_key + ' failed.' }) })
@@ -2018,8 +2133,11 @@ function BrowserTestsPage() {
         <label>Registered application<select value={applicationId} onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}><option value="">Choose an application</option>{applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}</select></label>
         <label>Suite name<input value={suiteName} onChange={(event) => setSuiteName(event.target.value)} placeholder="Smoke tests" /></label>
         <label className="browser-test-file">CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => previewFile(event.currentTarget.files?.[0])} /></label>
-        <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`} download="chronos-browser-tests-template.csv">Download CSV template</a>
+        {workflowTemplate ? <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(workflowTemplate.csv_template)}`} download="chronos-recorded-workflow-template.csv">Download {workflowTemplate.workflow_name} CSV</a> : <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`} download="chronos-browser-tests-template.csv">Download CSV template</a>}
       </div>
+      {workflowVersions.length > 0 && <label>Saved workflow version<select value={workflowTemplate?.workflow_version || ''} onChange={(event) => loadWorkflowVersion(Number(event.target.value))}>{workflowVersions.map((version) => <option key={version.workflow_version} value={version.workflow_version}>v{version.workflow_version} · {version.workflow_name} · {new Date(version.created_at).toLocaleDateString()}</option>)}</select></label>}
+      {workflowTemplate && <div className="browser-test-help"><strong>Recorded workflow v{workflowTemplate.workflow_version}:</strong> {workflowTemplate.workflow_name}. Captured actions: {workflowTemplate.action_plan.map((action) => action.action).join(' → ')}. CSV fields: {workflowTemplate.data_fields.map((field) => field.key).join(', ') || 'none'}. Edit the generated data values and expected result before importing test cases.</div>}
+      {workflowTemplate && <label className="browser-test-template-editor">Edit the recorded CSV template<textarea value={workflowCsvDraft} onChange={(event) => setWorkflowCsvDraft(event.target.value)} rows={7} spellCheck={false} /><button className="button button-secondary" disabled={busy || !applicationId} onClick={() => previewCsvText(workflowCsvDraft, 'recorded-workflow.csv')}>Preview edited template</button></label>}
       <div className="browser-test-help"><strong>Required columns:</strong> test_case_id, name, preconditions, steps, test_data, expected_result, priority. <strong>Optional:</strong> tags. Preconditions and test_data use JSON. Steps use the documented rule syntax below.</div>
       <div className="browser-test-import-controls">
         <label>Default timeout (seconds)<select value={runOptions.defaultTimeoutMs / 1000} onChange={(event) => setRunOptions((current) => ({ ...current, defaultTimeoutMs: Number(event.target.value) * 1000 }))}><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={20}>20 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label>
@@ -2065,7 +2183,7 @@ function BrowserTestsPage() {
       <p>Create, update, and delete require per-run approval, a same-origin POST form, and a following assertion. Deletes require explicit confirmation. Other methods and unscoped requests remain blocked.</p>
     </section>
 
-    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application changes. Review each operation and authorize this single run. Writes are limited to the registered origin and the exact POST form action observed for that step; results must pass a following assertion.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Network requests remain GET/HEAD, except the user-controlled login form while the login gate is open.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'I explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'I authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={approveQueuedCase}>Approve and run once{queuedCases.length ? ' · ' + queuedCases.length + ' queued after' : ''}</button></div></section></div>}
+    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application writes. Review each operation and explicitly enable writes for this run. Requests are limited to the registered application origin and the exact captured POST form path; the workflow must assert the result after each write.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Unreviewed POST requests and all other non-GET/HEAD requests remain blocked.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'Enable writes and explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'Enable writes and authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={approveQueuedCase}>Approve and run once{queuedCases.length ? ' · ' + queuedCases.length + ' queued after' : ''}</button></div></section></div>}
   </motion.div>
 }
 
