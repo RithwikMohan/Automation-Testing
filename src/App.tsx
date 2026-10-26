@@ -4,6 +4,7 @@ import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, Res
 import { Activity, AlertTriangle, Archive, ArrowUpRight, BarChart3, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3, CloudUpload, Compass, Copy, Edit3, ExternalLink, FileSpreadsheet, Film, GitBranch, Globe, Info, KeyRound, LayoutDashboard, List, Loader2, Menu, Play, Plus, Search, Settings as SettingsIcon, ShieldCheck, Sparkles, Tag, TrendingDown, TrendingUp, Upload, X, Zap } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getRegisteredBaseUrl, MISSING_BASE_URL_MESSAGE } from './explorationTarget'
+import { WorkflowBuilderModal } from './WorkflowBuilder'
 
 type Page = 'overview' | 'upload' | 'runs' | 'run-detail' | 'recordings' | 'reports' | 'settings' | 'applications' | 'create-automation' | 'automations' | 'task-planner' | 'browser-tests' | 'hcm-hiring'
 type Status = 'Passed' | 'Failed' | 'Running' | 'Pending' | 'Partial'
@@ -565,6 +566,15 @@ function WorkflowCaptureModal({ app, onClose, onSaved }: { app: Application; onC
     try { const response = await fetch(`${API}/api/workflow-recordings/${capture.id}/save`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: reviewName, actions: reviewActions, variables: reviewVariables }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not save workflow.'); captureIdRef.current = null; onSaved(); onClose() }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save workflow.') } finally { setBusy(false) }
   }
+  const setReviewVariableIncluded = (index: number, include: boolean) => {
+    const variable = reviewVariables[index]
+    if (!variable) return
+    setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, include } : item))
+    if (!include) {
+      const dependentActions = new Set((capture?.actions || []).filter((action) => action.dataKey === variable.captureKey).map((_action, captureIndex) => captureIndex))
+      setReviewActions((items) => items.map((item) => dependentActions.has(item.captureIndex) ? { ...item, include: false } : item))
+    }
+  }
   const cancel = async () => { if (captureIdRef.current) { const id = captureIdRef.current; captureIdRef.current = null; await fetch(`${API}/api/workflow-recordings/${id}`, { method: 'DELETE' }).catch(() => {}) } onClose() }
   return <div className="modal-backdrop" onClick={cancel}><motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="modal-panel card" onClick={(event) => event.stopPropagation()}>
     <div className="modal-heading"><div><div className="eyebrow">WORKFLOW RECORDER</div><h2>Record {app.name}</h2></div><button className="icon-button" onClick={cancel}><X size={18} /></button></div>
@@ -573,7 +583,7 @@ function WorkflowCaptureModal({ app, onClose, onSaved }: { app: Application; onC
     {capture && capture.state !== 'REVIEW_REQUIRED' && <form onSubmit={openTarget} className="workflow-target-navigation"><label htmlFor="workflow-target-url">Open URL in capture browser</label><div><input id="workflow-target-url" type="url" value={targetUrl} onChange={(event) => setTargetUrl(event.target.value)} placeholder="https://example.com" /><button className="button button-secondary" type="submit" disabled={busy}>Open</button></div></form>}
     {capture?.state === 'WAITING_FOR_MANUAL_LOGIN' && <><div className="browser-test-auth-prompt"><strong>Capture is recording the login workflow.</strong><span>Sign in in the browser, then return here and choose Continue capture after login. Values typed during capture are not stored; the reviewed workflow may add blank username/password columns to the CSV.</span><button className="button button-primary" disabled={busy} onClick={begin}>Continue capture after login</button></div><ol>{capture.actions?.map((action, index) => <li key={index}>{action.sequence || index + 1}. {action.action} · {action.url ? new URL(action.url).pathname : action.locator ? action.locator.name || action.locator.value || action.locator.kind : 'page transition'}{action.dataKey ? ` → ${action.dataKey}` : ''}</li>)}</ol>{capture.diagnostics?.map((diagnostic, index) => <div className="exploration-warning-box" key={index}>{diagnostic}</div>)}</>}
     {(capture?.state === 'CAPTURING' || capture?.state === 'PAUSED') && <><p><strong>{capture.state === 'PAUSED' ? 'Capture paused.' : 'Capture active.'}</strong> Complete the representative workflow, then review it.</p><ol>{capture.actions?.map((action, index) => <li key={index}>{action.sequence || index + 1}. {action.action} · {action.url ? new URL(action.url).pathname : action.locator ? action.locator.name || action.locator.value || action.locator.kind : 'page transition'}{action.dataKey ? ` → ${action.dataKey}` : ''}{action.element?.tag ? ` · ${action.element.tag}` : ''}</li>)}</ol>{capture.diagnostics?.map((diagnostic, index) => <div className="exploration-warning-box" key={index}>{diagnostic}</div>)}<div style={{ display: 'flex', gap: 8 }}><button className="button button-secondary" disabled={busy} onClick={() => setCaptureState(capture.state === 'PAUSED' ? 'resume' : 'pause')}>{capture.state === 'PAUSED' ? 'Resume capture' : 'Pause capture'}</button><button className="button button-primary" disabled={busy || !capture.actions?.length} onClick={finish}>{busy ? 'Finishing…' : 'Finish and review workflow'}</button></div><label className="browser-test-approve-check"><input type="checkbox" checked={reuseSession} onChange={(event) => setReuseSession(event.target.checked)} /> Keep this approved manual login available for test runs for 15 minutes (memory only)</label></>}
-    {capture?.state === 'REVIEW_REQUIRED' && <><label>Workflow name<input value={reviewName} maxLength={120} onChange={(event) => setReviewName(event.target.value)} /></label><h3>Review captured actions</h3><div className="workflow-review-list">{reviewActions.map((review, index) => { const action = capture.actions?.[review.captureIndex]; if (!action) return null; return <div className="workflow-review-row" key={review.captureIndex}><label><input type="checkbox" checked={review.include} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, include: event.target.checked } : item))} /> {action.sequence || index + 1}. {action.action}{action.credentialInput ? ' · password field (value not captured)' : action.manualLoginSubmit ? ' · manual login submit' : ''}</label><span>{action.element?.tag || 'element'}{action.pageUrl ? ` · ${new URL(action.pageUrl).pathname}` : action.url ? ` · ${new URL(action.url).pathname}` : ''}</span>{action.action !== 'navigate' && <select aria-label={`Locator for action ${review.captureIndex + 1}`} value={review.locatorCandidateIndex} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, locatorCandidateIndex: Number(event.target.value) } : item))}>{(action.locatorCandidates || (action.locator ? [action.locator] : [])).map((candidate, candidateIndex) => <option key={candidateIndex} value={candidateIndex}>{candidate.kind}: {candidate.name || candidate.value}</option>)}</select>}</div>})}</div><h3>CSV variables</h3>{reviewVariables.map((variable, index) => <div className="workflow-review-row" key={variable.captureKey}><label><input type="checkbox" checked={variable.include} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, include: event.target.checked } : item))} /> Include field</label><input aria-label="CSV column name" disabled={variable.credential} value={variable.key} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, key: event.target.value } : item))} /><input aria-label="Field label" value={variable.label} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, label: event.target.value } : item))} /><label><input type="checkbox" checked={variable.required} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, required: event.target.checked } : item))} /> Required</label></div>)}<div className="field-hint">Password values are not captured. If included, the downloaded CSV contains a blank password column that you fill in yourself.</div><button className="button button-primary" disabled={busy} onClick={saveReview}>{busy ? 'Saving…' : 'Save workflow and generate CSV'}</button></>}
+    {capture?.state === 'REVIEW_REQUIRED' && <><label>Workflow name<input value={reviewName} maxLength={120} onChange={(event) => setReviewName(event.target.value)} /></label><h3>Review captured actions</h3><div className="workflow-review-list">{reviewActions.map((review, index) => { const action = capture.actions?.[review.captureIndex]; if (!action) return null; return <div className="workflow-review-row" key={review.captureIndex}><label><input type="checkbox" checked={review.include} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, include: event.target.checked } : item))} /> {action.sequence || index + 1}. {action.action}{action.credentialInput ? ' · password field (value not captured)' : action.manualLoginSubmit ? ' · manual login submit' : ''}</label><span>{action.element?.tag || 'element'}{action.pageUrl ? ` · ${new URL(action.pageUrl).pathname}` : action.url ? ` · ${new URL(action.url).pathname}` : ''}</span>{action.action !== 'navigate' && <select aria-label={`Locator for action ${review.captureIndex + 1}`} value={review.locatorCandidateIndex} onChange={(event) => setReviewActions((items) => items.map((item) => item.captureIndex === review.captureIndex ? { ...item, locatorCandidateIndex: Number(event.target.value) } : item))}>{(action.locatorCandidates || (action.locator ? [action.locator] : [])).map((candidate, candidateIndex) => <option key={candidateIndex} value={candidateIndex}>{candidate.kind}: {candidate.name || candidate.value}</option>)}</select>}</div>})}</div><h3>CSV variables</h3>{reviewVariables.map((variable, index) => <div className="workflow-review-row" key={variable.captureKey}><label><input type="checkbox" checked={variable.include} onChange={(event) => setReviewVariableIncluded(index, event.target.checked)} /> Include field</label><input aria-label="CSV column name" disabled={variable.credential} value={variable.key} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, key: event.target.value } : item))} /><input aria-label="Field label" value={variable.label} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, label: event.target.value } : item))} /><label><input type="checkbox" checked={variable.required} onChange={(event) => setReviewVariables((items) => items.map((item, i) => i === index ? { ...item, required: event.target.checked } : item))} /> Required</label></div>)}<div className="field-hint">Password values are not captured. If included, the downloaded CSV contains a blank password column that you fill in yourself. Excluding a field also removes the captured action that fills or selects it.</div><button className="button button-primary" disabled={busy} onClick={saveReview}>{busy ? 'Saving…' : 'Save workflow and generate CSV'}</button></>}
     {busy && !capture && <p>Opening isolated browser…</p>}
     <button className="button button-secondary" onClick={cancel} style={{ marginLeft: 8 }}>Cancel</button>
   </motion.div></div>
@@ -591,6 +601,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
   const [detailApp, setDetailApp] = useState<Application | null>(null)
   const [exploreApp, setExploreApp] = useState<Application | null>(null)
   const [captureApp, setCaptureApp] = useState<Application | null>(null)
+  const [builderApp, setBuilderApp] = useState<Application | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000) }
@@ -692,6 +703,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
               <div className="app-footer">
                 <span className="app-date">Updated {new Date(app.updated_at).toLocaleDateString()}</span>
                 <div style={{ display: 'flex', gap: 10 }}>
+                  <button className="text-button" onClick={() => setBuilderApp(app)}><Edit3 size={12} style={{ marginRight: 3 }} /> Workflow builder</button>
                   <button className="text-button" onClick={() => setCaptureApp(app)}><Play size={12} style={{ marginRight: 3 }} /> Record workflow</button>
                   <button className="text-button" onClick={() => setExploreApp(app)}><Compass size={12} style={{ marginRight: 3 }} /> Inspect</button>
                   <button className="text-button" onClick={() => { navigate('create-automation') }}>+ New task</button>
@@ -764,6 +776,7 @@ function ApplicationsPage({ navigate }: { navigate: (p: Page) => void }) {
         )}
       </AnimatePresence>
       <AnimatePresence>{captureApp && <WorkflowCaptureModal app={captureApp} onClose={() => setCaptureApp(null)} onSaved={() => showToast('Workflow saved. Download its CSV template in Rule-Based Tests.')} />}</AnimatePresence>
+      <AnimatePresence>{builderApp && <WorkflowBuilderModal application={builderApp} onClose={() => setBuilderApp(null)} onOpenTests={() => { window.localStorage.setItem('chronos-workflow-application', builderApp.id); setBuilderApp(null); navigate('browser-tests') }} />}</AnimatePresence>
     </motion.div>
   )
 }
@@ -1907,7 +1920,7 @@ function BrowserTestsPage() {
   const [suites, setSuites] = useState<BrowserTestSuite[]>([])
   const [executions, setExecutions] = useState<BrowserTestExecution[]>([])
   const [cases, setCases] = useState<BrowserTestCase[]>([])
-  const [applicationId, setApplicationId] = useState('')
+  const [applicationId, setApplicationId] = useState(() => window.localStorage.getItem('chronos-workflow-application') || '')
   const [suiteId, setSuiteId] = useState('')
   const [fileName, setFileName] = useState('')
   const [csvText, setCsvText] = useState('')
@@ -1938,7 +1951,8 @@ function BrowserTestsPage() {
     setApplications(appData.map((item: BrowserTestApp) => ({ id: item.id, name: item.name, base_url: item.base_url })))
     setSuites(suiteData)
     setExecutions(runData)
-    if (!applicationId && appData[0]) setApplicationId(appData[0].id)
+    if (applicationId && appData.some((item: BrowserTestApp) => item.id === applicationId)) window.localStorage.removeItem('chronos-workflow-application')
+    else if (appData[0]) { window.localStorage.removeItem('chronos-workflow-application'); setApplicationId(appData[0].id) }
   }
   useEffect(() => { refresh().catch((error) => setMessage(error.message)) }, [])
   useEffect(() => {

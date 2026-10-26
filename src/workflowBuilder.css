@@ -1,0 +1,6 @@
+.workflow-action-top{grid-template-columns:150px minmax(120px,1fr) auto auto}
+.workflow-variable-row{grid-template-columns:1fr 1.2fr .75fr 1fr 1fr auto auto auto}
+.workflow-status-valid,.workflow-status-invalid{font-size:9px;font-style:normal;white-space:nowrap}
+.workflow-status-valid{color:var(--cyan)}
+.workflow-status-invalid{color:#ffae9e}
+@media(max-width:780px){.workflow-action-top{grid-template-columns:1fr auto}.workflow-action-top>span{grid-column:1/-1;grid-row:2}.workflow-variable-row{grid-template-columns:1fr 1fr}}

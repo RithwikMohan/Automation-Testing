@@ -7,7 +7,7 @@ export const ACTION_RULES = Object.freeze({
   create: ['locator'], update: ['locator'], delete: ['locator'],
 })
 
-const LOCATOR_KINDS = new Set(['role', 'text', 'label', 'placeholder', 'testid', 'css', 'id', 'name'])
+const LOCATOR_KINDS = new Set(['role', 'text', 'label', 'placeholder', 'testid', 'css', 'xpath', 'id', 'name'])
 const ASSERTION_ACTIONS = new Set(['assert_visible', 'assert_text', 'assert_url', 'assert_value', 'assert_count_gt'])
 
 export function validateActionPlan(plan, testData = {}) {
@@ -20,7 +20,7 @@ export function validateActionPlan(plan, testData = {}) {
     if (required.some((key) => action[key] === undefined || action[key] === null)) {
       throw Object.assign(new Error('The saved "' + action.action + '" action is missing required parameters.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }
-    if (action.locator && (!LOCATOR_KINDS.has(action.locator.kind) || typeof (action.locator.value || action.locator.name) !== 'string' || (action.locator.value || action.locator.name).length > 160)) {
+    if (action.locator && (!LOCATOR_KINDS.has(action.locator.kind) || typeof (action.locator.value || action.locator.name) !== 'string' || (action.locator.value || action.locator.name).length > (['css', 'xpath'].includes(action.locator.kind) ? 500 : 160))) {
       throw Object.assign(new Error('The saved action contains an invalid locator.'), { code: 'INVALID_ACTION_PARAMETERS' })
     }
     if (action.locatorCandidates !== undefined && (!Array.isArray(action.locatorCandidates) || action.locatorCandidates.length < 1 || action.locatorCandidates.length > 8 || action.locatorCandidates.some((candidate) => !candidate || !LOCATOR_KINDS.has(candidate.kind) || typeof (candidate.value || candidate.name) !== 'string' || (candidate.value || candidate.name).length > 160))) {

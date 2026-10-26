@@ -36,6 +36,7 @@ function inferWriteOperation(label, method, locatorCandidates = []) {
     ? locatorCandidates.filter((candidate) => ['id', 'name', 'testid'].includes(candidate?.kind)).map((candidate) => String(candidate.value || '').toLowerCase())
     : []
   if (identifiers.some((value) => /^t_button_navcontrol$/.test(value)) || /^(t_button_navcontrol|this_week|last_week|next_week|this week|last week|next week)$/.test(text)) return null
+  if (/^(search|find|filter|sort|refresh|view|open|expand|collapse|next|previous|back|home|menu)(?:\b|\s|:)/.test(text)) return null
   if (/\b(delete|remove|terminate)\b/.test(text) || method === 'DELETE') return 'delete'
   if (/\b(update|edit|save|modify)\b/.test(text) || ['PUT', 'PATCH'].includes(method)) return 'update'
   return 'create'
@@ -71,6 +72,15 @@ export function isCapturedFormWrite(session, method, targetUrl, contentType) {
   const postback = action?.postbackAuthorization
   const authorization = auth || postback
   return Boolean(authorization && authorization.method === method && authorization.origin === targetUrl.origin && authorization.path === targetUrl.pathname)
+}
+
+function isCapturedOracleReadPostback(session, method, targetUrl) {
+  if (!session.captureActive || session.manualAuthActive || session.application.auth_method !== 'manual' || method !== 'POST') return false
+  let origin
+  try { origin = normalizeAllowedOrigin(targetUrl.origin) } catch { return false }
+  if (origin !== session.appOrigin) return false
+  if (['/fscmUI/BIProxy', '/fscmUI/faces/AtkHomePageWelcome'].includes(targetUrl.pathname)) return true
+  return /^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/workerJourneys\/action\/findOrAssignContextualJourney$/i.test(targetUrl.pathname)
 }
 
 export function validateCaptureNavigationUrl(value) {
@@ -112,7 +122,10 @@ function buildPageCaptureScript() {
       }
       return null
     }
-    const labelFor = (element) => safeText(element.getAttribute('aria-label') || [...(element.labels || [])].map((label) => label.innerText).join(' ') || element.getAttribute('placeholder') || element.getAttribute('data-testid') || element.id.replace(/[_-]+/g, ' ') || element.getAttribute('name')?.replace(/[_-]+/g, ''))
+    const labelFor = (element) => {
+      const labelledBy = safeText((element.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => document.getElementById(id)?.innerText || '').join(' '))
+      return safeText(element.getAttribute('aria-label') || labelledBy || [...(element.labels || [])].map((label) => label.innerText).join(' ') || element.getAttribute('placeholder') || element.getAttribute('data-testid') || element.id.replace(/[_-]+/g, ' ') || element.getAttribute('name')?.replace(/[_-]+/g, ''))
+    }
     const locatorFor = (element) => {
       const tag = element.tagName.toLowerCase()
       const label = labelFor(element)
@@ -150,6 +163,42 @@ function buildPageCaptureScript() {
     const secretField = (element, label) => element.type === 'password' || element.type === 'hidden' || /password|passwd|passcode|token|secret|credential|authorization|cookie|api[_ -]?key/i.test(`${label} ${element.name || ''} ${element.autocomplete || ''}`)
     const loginForm = (element) => Boolean(element.form?.querySelector('input[type="password"]'))
     const send = (payload) => window.__chronosRecordAction?.(payload).catch(() => {})
+    let pendingSelect = null
+    let lastSelect = null
+    const selectControlFor = (element) => element?.closest?.('select, [role="combobox"], oj-select-single, oj-combobox-one, oj-select-many') || null
+    const selectControlPayload = (control) => {
+      if (!control) return null
+      const locator = locatorFor(control)
+      const locatorCandidates = candidatesFor(control)
+      if (!locator) return null
+      if (!locatorCandidates.length) locatorCandidates.push(locator)
+      const label = labelFor(control) || safeText(control.getAttribute('aria-label') || control.getAttribute('name') || control.id || 'Selection')
+      return {
+        locator,
+        locatorCandidates,
+        label,
+        metadata: {
+          label,
+          name: control.getAttribute('name') || '',
+          id: control.id || '',
+          placeholder: control.getAttribute('placeholder') || '',
+          type: 'select',
+        },
+      }
+    }
+    const recordSelect = (control) => {
+      if (lastSelect?.control === control && Date.now() - lastSelect.at < 500) {
+        pendingSelect = null
+        return
+      }
+      const payload = selectControlPayload(control)
+      if (payload) {
+        send({ type: 'select', ...payload })
+        lastSelect = { control, at: Date.now() }
+      }
+      pendingSelect = null
+    }
+    const controlFromOpenList = () => document.querySelector('select[aria-expanded="true"], [role="combobox"][aria-expanded="true"], oj-select-single[aria-expanded="true"], oj-combobox-one[aria-expanded="true"], oj-select-many[aria-expanded="true"]')
     const reportNavigation = () => send({ type: 'navigate', url: location.href })
     addEventListener('popstate', reportNavigation)
     for (const method of ['pushState', 'replaceState']) {
@@ -157,8 +206,19 @@ function buildPageCaptureScript() {
       history[method] = (...args) => { const result = original(...args); queueMicrotask(reportNavigation); return result }
     }
     document.addEventListener('click', (event) => {
-      const element = event.target instanceof Element ? event.target.closest('button,a,input[type="button"],input[type="submit"],[role="button"],[role="link"],[role="tab"],[role="menuitem"]') : null
+      const element = event.target instanceof Element ? event.target.closest('button,a,input[type="button"],input[type="submit"],select,[role="combobox"],oj-select-single,oj-combobox-one,oj-select-many,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="option"]') : null
       if (!element || element.closest('[data-chronos-recorder-ui]')) return
+      if (element.matches('[role="option"]')) {
+        const control = pendingSelect?.control || controlFromOpenList()
+        if (control) recordSelect(control)
+        return
+      }
+      const selectControl = selectControlFor(element)
+      if (selectControl) {
+        pendingSelect = { control: selectControl }
+        return
+      }
+      pendingSelect = null
       const locator = locatorFor(element)
       if (!locator) return
       const label = safeText(element.getAttribute('aria-label') || element.innerText || element.value || element.title)
@@ -175,6 +235,11 @@ function buildPageCaptureScript() {
     }, true)
     document.addEventListener('change', (event) => {
       const element = event.target
+      const selectControl = selectControlFor(element)
+      if (selectControl && !(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+        recordSelect(selectControl)
+        return
+      }
       if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) return
       const label = labelFor(element)
       const passwordCredential = element instanceof HTMLInputElement && element.type === 'password'
@@ -188,6 +253,12 @@ function buildPageCaptureScript() {
       else if (element instanceof HTMLSelectElement) send({ type: 'select', locator, locatorCandidates: candidatesFor(element), metadata, label })
       else send({ type: 'fill', locator, locatorCandidates: candidatesFor(element), metadata, label })
     }, true)
+    for (const eventName of ['valueChanged', 'ojValueAction']) {
+      document.addEventListener(eventName, (event) => {
+        const selectControl = selectControlFor(event.target)
+        if (selectControl) recordSelect(selectControl)
+      }, true)
+    }
   }
 }
 
@@ -224,26 +295,44 @@ export async function startWorkflowCapture(application, options = {}) {
     resourceOrigins: [...approvedResourceOrigins].filter((origin) => origin !== normalizeAllowedOrigin(baseUrl.origin)),
     internalOrigins, allowPublicOrigins: true, manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin),
     manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive,
-    manualCaptureRequestAllowed: ({ method, targetUrl, contentType }) => isCapturedFormWrite(session, method, targetUrl, contentType),
+    // Manual capture is explicitly user-attended; pass through its app requests so
+    // framework APIs and form submissions can run. The proxy still enforces safe
+    // destination resolution, standard ports, and private-network authorization.
+    manualCaptureRequestAllowed: () => session.captureActive,
     dnsLookup: options.dnsLookup,
     testTargetIp: options.testTargetIp,
     testTargetPort: options.testTargetPort,
     connectTimeoutMs: 8000,
   })
   try {
-    session.browser = await (options.browserType || chromium).launch({
+    const browserType = options.browserType || chromium
+    const launchOptions = {
       headless: typeof options.headless === 'boolean' ? options.headless : false, timeout: 20000,
       ...(options.executablePath ? { executablePath: options.executablePath } : {}),
       proxy: { server: session.proxy.proxyUrl, bypass: '<-loopback>' },
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + session.proxy.proxyUrl],
-    })
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + session.proxy.proxyUrl],
+    }
+    // On Windows, use the user's installed Chrome when available to match the
+    // browser behavior they use for Oracle HCM. Keep the bundled Chromium fallback
+    // for machines without Chrome and for deterministic injected browser types.
+    if (!options.browserType && !options.executablePath && process.platform === 'win32') {
+      try {
+        session.browser = await browserType.launch({ ...launchOptions, channel: 'chrome' })
+      } catch (error) {
+        if (!/chrome.*(?:not found|not installed)|executable doesn't exist/i.test(String(error?.message || error))) throw error
+        session.diagnostics.push('Google Chrome was not found; using the bundled Chromium browser for capture.')
+      }
+    }
+    if (!session.browser) session.browser = await browserType.launch(launchOptions)
     session.browser.on?.('disconnected', () => {
       session.captureActive = false
       session.paused = false
       session.browserClosed = true
       session.diagnostics.push('The capture browser disconnected. Captured actions can still be reviewed and saved.')
     })
-    session.context = await session.browser.newContext({ ignoreHTTPSErrors: false, serviceWorkers: 'block', viewport: { width: 1440, height: 900 } })
+    // Match the visible headed browser window so fixed footers remain on-screen
+    // even when desktop chrome and the taskbar reduce the available page height.
+    session.context = await session.browser.newContext({ ignoreHTTPSErrors: false, serviceWorkers: 'block', viewport: null })
     session.page = await session.context.newPage()
     await session.context.exposeBinding('__chronosRecordAction', (_source, payload) => {
       if (!session.captureActive || session.actions.length >= 50) return
@@ -321,13 +410,17 @@ export async function startWorkflowCapture(application, options = {}) {
       // Private/internal destinations still require explicit application approval.
       if (request.isNavigationRequest()) {
         session.navOrigins.add(origin)
-        if (session.manualAuthActive) session.manualAuthOrigins.add(origin)
+        // Only a completed read navigation establishes a manual-auth origin; don't
+        // let the POST being evaluated add its own destination to the auth allowlist.
+        if (session.manualAuthActive && ['GET', 'HEAD'].includes(request.method())) session.manualAuthOrigins.add(origin)
       }
       const contentType = request.method() === 'POST' ? await request.headerValue('content-type').catch(() => null) : null
-      const loginPost = isManualLoginPostAllowed({ method: request.method(), targetUrl: url, contentType, manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin), manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive })
+      const accessControlRequestMethod = request.method() === 'OPTIONS' ? await request.headerValue('access-control-request-method').catch(() => null) : null
+      const loginPost = isManualLoginPostAllowed({ method: request.method(), targetUrl: url, contentType, accessControlRequestMethod, manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin), manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive })
       const captureWrite = isCapturedFormWrite(session, request.method(), url, contentType)
-      if (!['GET', 'HEAD'].includes(request.method()) && !loginPost && !captureWrite) return blocked('request method is not allowed by the active manual-login or reviewed-form policy')
-      if (captureWrite && session.lastActionIndex >= 0) {
+      const oracleReadPostback = isCapturedOracleReadPostback(session, request.method(), url)
+      if (!session.captureActive && !['GET', 'HEAD'].includes(request.method()) && !loginPost && !captureWrite && !oracleReadPostback) return blocked('request method is not allowed by the active manual-login or reviewed-form policy')
+      if (captureWrite && !oracleReadPostback && session.lastActionIndex >= 0) {
         const action = session.actions[session.lastActionIndex]
         if (action && ['click', 'create', 'update', 'delete'].includes(action.action) && !action.writeAuthorization && session.navOrigins.has(normalizeAllowedOrigin(url.origin))) {
           const operation = inferWriteOperation(action.locator.name || action.locator.value, request.method(), action.locatorCandidates)
@@ -393,8 +486,13 @@ export async function startWorkflowCapture(application, options = {}) {
       page.on('domcontentloaded', async () => {
       if (!session.manualAuthActive || page.isClosed()) return
       try {
-        const origin = normalizeAllowedOrigin(new URL(page.url()).origin)
+        const pageUrl = new URL(page.url())
+        const origin = normalizeAllowedOrigin(pageUrl.origin)
         session.manualAuthOrigins.add(origin)
+        // Identity providers often submit credentials back to the currently rendered
+        // endpoint through script-driven forms. Keep that exact observed path in scope
+        // even when the form isn't exposed as a conventional <form> element.
+        session.manualAuthPaths.add(origin + pageUrl.pathname)
         const paths = await page.locator('form').evaluateAll((forms) => forms.filter((form) => form.method.toUpperCase() === 'POST').map((form) => { try { const target = new URL(form.action, location.href); return target.origin === location.origin ? target.pathname : null } catch { return null } }).filter(Boolean))
         for (const path of paths) session.manualAuthPaths.add(origin + path)
       } catch {}
@@ -437,6 +535,19 @@ export function workflowCaptureSnapshot(id) {
   const session = getSession(id)
   if (!session) return null
   return { id, state: session.reviewRequired ? 'REVIEW_REQUIRED' : session.browserClosed ? 'BROWSER_CLOSED' : session.paused ? 'PAUSED' : session.manualAuthActive ? 'WAITING_FOR_MANUAL_LOGIN' : session.captureActive ? 'CAPTURING' : 'READY', currentUrl: safeCurrentUrl(session.page), workflowName: session.workflowName || `${session.application.name} recorded workflow`, actions: session.actions.map(({ action, url, locator, locatorCandidates, dataKey, credentialInput, manualLoginSubmit, requiresWriteApproval, writeAuthorization, postbackAuthorization, sequence, capturedAt, pageUrl, pageUrlAfter, element }) => ({ action, url, locator, locatorCandidates, dataKey, credentialInput, manualLoginSubmit, requiresWriteApproval, ...(writeAuthorization ? { writeAuthorization } : {}), ...(postbackAuthorization ? { postbackAuthorization } : {}), sequence, capturedAt, pageUrl, pageUrlAfter, element })), fields: [...session.fields.values()], diagnostics: session.diagnostics.slice(-20) }
+}
+
+function isManualLoginSubmitAction(session, action) {
+  if (action.manualLoginSubmit === true) return true
+  if (action.action !== 'click' || !session.fields.size) return false
+  const hasPasswordFill = session.actions.some((item) => item.credentialInput === true && item.sequence < action.sequence)
+  if (!hasPasswordFill) return false
+  let origin
+  try { origin = normalizeAllowedOrigin(new URL(action.pageUrl).origin) } catch { return false }
+  if (!session.manualAuthOrigins.has(origin)) return false
+  const labels = [action.locator?.name, action.locator?.value, ...(action.locatorCandidates || []).map((item) => item.name || item.value)]
+    .filter(Boolean).map((label) => String(label).trim().toLowerCase())
+  return labels.some((label) => /^(next|continue|submit|sign in|sign-in|log in|login)$/.test(label))
 }
 
 export async function beginWorkflowCapture(id) {
@@ -546,7 +657,7 @@ export async function saveReviewedWorkflowCapture(id, review = {}) {
       if (!Number.isInteger(candidateIndex) || candidateIndex < 0 || candidateIndex >= candidates.length) throw new Error(`Action ${index + 1} has an invalid locator selection.`)
       action = { ...action, locator: candidates[candidateIndex], locatorCandidates: candidates }
       if (captured.credentialInput === true) { action.credentialInput = true; action.variableKey = action.dataKey }
-      if (captured.manualLoginSubmit === true) action.manualLoginSubmit = true
+      if (isManualLoginSubmitAction(session, captured)) action.manualLoginSubmit = true
     }
     if (captured.dataKey) {
       const mapped = renameMap.get(captured.dataKey)

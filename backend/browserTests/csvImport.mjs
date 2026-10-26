@@ -26,7 +26,9 @@ export function parseTestCaseCsv(csvText, { workflowVariables, workflowVersion }
   const workflowMode = Array.isArray(workflowVariables)
   const allowedCredentialKeys = new Set(workflowMode ? workflowVariables.filter((variable) => variable.credential === true && variable.key === 'password').map((variable) => variable.key) : [])
   const requiredHeaders = workflowMode ? REQUIRED_HEADERS.filter((header) => header !== 'test_data') : REQUIRED_HEADERS
-  const missing = [...requiredHeaders.filter((header) => !fields.includes(header)), ...(workflowMode ? workflowVariables.filter((variable) => variable.variable !== false && !fields.includes(variable.key)).map((variable) => variable.key) : [])]
+  // Workflow data fields are selectable per CSV: an omitted variable column means
+  // that field is not part of this test case. Fixed case metadata remains required.
+  const missing = requiredHeaders.filter((header) => !fields.includes(header))
   const errors = []
   if (new Set(fields).size !== fields.length) return { rows: [], errors: ['CSV contains duplicate column headers after normalization.'] }
   if (missing.length) return { rows: [], errors: ['Missing required CSV columns: ' + missing.join(', ') + '.'] }
@@ -66,11 +68,24 @@ export function parseTestCaseCsv(csvText, { workflowVariables, workflowVersion }
 
     const preconditions = parseJsonField(raw.preconditions, [], 'Preconditions', rowErrors)
     const testData = workflowMode && !fields.includes('test_data')
-      ? Object.fromEntries(workflowVariables.filter((variable) => variable.variable !== false).map((variable) => [variable.key, String(raw[variable.key] ?? '')]))
+      ? Object.fromEntries(workflowVariables.filter((variable) => variable.variable !== false).map((variable) => [variable.key, fields.includes(variable.key) ? String(raw[variable.key] ?? '').trim() || String(variable.defaultValue ?? '') : '']))
       : parseJsonField(raw.test_data, {}, 'Test data', rowErrors)
     if (workflowMode && !fields.includes('test_data')) {
       for (const variable of workflowVariables.filter((item) => item.variable !== false && item.required !== false)) {
-        if (!String(testData[variable.key] ?? '').trim()) rowErrors.push(`Required workflow field "${variable.label || variable.key}" is missing.`)
+        if (fields.includes(variable.key) && !String(testData[variable.key] ?? '').trim()) rowErrors.push(`Required workflow field "${variable.label || variable.key}" is missing.`)
+      }
+      for (const variable of workflowVariables.filter((item) => item.variable !== false)) {
+        const value = String(testData[variable.key] ?? '').trim()
+        if (!value) continue
+        if (variable.type === 'number' && !Number.isFinite(Number(value))) rowErrors.push(`Workflow field "${variable.label || variable.key}" must be a number.`)
+        if (variable.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) rowErrors.push(`Workflow field "${variable.label || variable.key}" must be a valid email address.`)
+        if (variable.type === 'date' && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) rowErrors.push(`Workflow field "${variable.label || variable.key}" must be a valid ISO date (YYYY-MM-DD).`)
+        if (variable.pattern) {
+          try {
+            if (/(\\[1-9]|\(\?[:=!<]|\([^)]*[+*][^)]*\)[+*{])/.test(variable.pattern)) throw new Error('unsafe')
+            if (!new RegExp(variable.pattern).test(value)) rowErrors.push(`Workflow field "${variable.label || variable.key}" does not match its validation pattern.`)
+          } catch { rowErrors.push(`Workflow field "${variable.label || variable.key}" has an invalid or unsupported validation pattern.`) }
+        }
       }
     }
     if (!Array.isArray(preconditions) || preconditions.some((value) => typeof value !== 'string' || value.length > 500)) rowErrors.push('Preconditions must be a JSON array of short strings.')

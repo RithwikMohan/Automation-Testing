@@ -251,26 +251,42 @@ export function normalizeAllowedOrigin(value) {
   return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ''}`
 }
 
-/** Permit only a form POST to a rendered same-origin login action during the manual auth gate. */
-export function isManualLoginPostAllowed({ method, targetUrl, contentType, manualAuthOrigin, manualAuthOrigins, manualAuthPaths, isManualAuthActive }) {
-  if (method !== 'POST' || typeof manualAuthOrigin !== 'string' || typeof isManualAuthActive !== 'function' || !isManualAuthActive()) return false
+/** Permit login submissions to origins visited during the user-attended manual auth gate. */
+export function isManualLoginPostAllowed({ method, targetUrl, contentType, accessControlRequestMethod, manualAuthOrigin, manualAuthOrigins, manualAuthPaths, isManualAuthActive }) {
+  const isPreflight = method === 'OPTIONS'
+  if ((!isPreflight && method !== 'POST') || typeof manualAuthOrigin !== 'string' || typeof isManualAuthActive !== 'function' || !isManualAuthActive()) return false
+  // CORS preflight is non-mutating, but must be limited to a POST preflight for
+  // an origin observed during this user-attended login sequence.
+  if (isPreflight && String(accessControlRequestMethod || '').toUpperCase() !== 'POST') return false
   let target
   try {
     target = targetUrl instanceof URL ? targetUrl : new URL(String(targetUrl))
   } catch {
     return false
   }
-  const allowedLoginOrigins = manualAuthOrigins instanceof Set
-    ? new Set([...manualAuthOrigins].map(normalizeAllowedOrigin))
-    : new Set([normalizeAllowedOrigin(manualAuthOrigin)])
+  // The manual-auth observer can race a redirect through an opaque browser URL
+  // (for example about:blank). Ignore such observations instead of letting one
+  // malformed entry break every subsequent POST decision.
+  const allowedLoginOrigins = new Set()
+  if (manualAuthOrigins instanceof Set) {
+    for (const origin of manualAuthOrigins) {
+      try { allowedLoginOrigins.add(normalizeAllowedOrigin(origin)) } catch {}
+    }
+  } else {
+    try { allowedLoginOrigins.add(normalizeAllowedOrigin(manualAuthOrigin)) } catch { return false }
+  }
   if (!originAllowed(target, allowedLoginOrigins)) return false
   const targetOrigin = normalizeAllowedOrigin(target.origin)
-  const pathIsObserved = manualAuthPaths instanceof Set && (
-    manualAuthPaths.has(targetOrigin + target.pathname) ||
-    (!(manualAuthOrigins instanceof Set) && manualAuthPaths.has(target.pathname))
-  )
-  if (!pathIsObserved) return false
-  return /^application\/(x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(String(contentType || ''))
+  // With a live origin set, the recorder has already observed a GET navigation to
+  // that origin. Identity providers may submit to a different endpoint path than
+  // the rendered form exposes (or use a script-driven form), so path matching is
+  // too strict here. Keep path matching for legacy callers without an origin set.
+  if (!(manualAuthOrigins instanceof Set)) {
+    const pathIsObserved = manualAuthPaths instanceof Set && manualAuthPaths.has(target.pathname)
+    if (!pathIsObserved) return false
+  }
+  if (isPreflight) return true
+  return /^application\/(x-www-form-urlencoded|multipart\/form-data|json)(?:;|$)/i.test(String(contentType || ''))
 }
 
 /** Permit a write only during its approved form-submit action and only to that form's exact primary-origin path. */
@@ -451,6 +467,7 @@ export async function createSecurityProxy(config) {
       method: req.method,
       targetUrl,
       contentType: req.headers['content-type'],
+      accessControlRequestMethod: req.headers['access-control-request-method'],
       manualAuthOrigin,
       manualAuthOrigins,
       manualAuthPaths,
@@ -493,6 +510,15 @@ export async function createSecurityProxy(config) {
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers)
           proxyRes.pipe(res)
+        })
+
+        // The configured timeout is for establishing the outbound connection.
+        // Clear the socket idle timer once connected so slow Oracle responses or
+        // keep-alive requests aren't mistaken for failed connection attempts.
+        proxyReq.once('socket', (socket) => {
+          const clearConnectTimeout = () => socket.setTimeout(0)
+          if (socket.connecting) socket.once('connect', clearConnectTimeout)
+          else clearConnectTimeout()
         })
 
         proxyReq.on('timeout', () => {
@@ -560,6 +586,7 @@ export async function createSecurityProxy(config) {
           port: destPort,
           timeout: connectTimeoutMs,
         }, () => {
+          targetSocket.setTimeout(0)
           clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
           if (head && head.length > 0) {
             targetSocket.write(head)

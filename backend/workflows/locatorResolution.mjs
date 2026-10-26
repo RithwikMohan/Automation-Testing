@@ -6,6 +6,8 @@ function toLocator(page, candidate) {
   if (candidate.kind === 'testid') return page.getByTestId(candidate.value)
   if (candidate.kind === 'id') return page.locator(`#${candidate.value.replace(/([^a-zA-Z0-9_-])/g, '\\$1')}`)
   if (candidate.kind === 'name') return page.locator(`[name="${candidate.value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"]`)
+  if (candidate.kind === 'css') return page.locator(candidate.value)
+  if (candidate.kind === 'xpath') return page.locator(`xpath=${candidate.value}`)
   throw new Error('Unsupported workflow locator candidate.')
 }
 

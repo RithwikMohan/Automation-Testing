@@ -11,7 +11,7 @@ export function generateWorkflowCsvTemplate(definition, workflowVersion = 1) {
   const variables = (definition.variables || []).filter((item) => item.variable !== false && (item.sensitive !== true || item.credential === true))
   const headers = [...FIXED_HEADERS.slice(0, 4), ...variables.map((item) => item.key), ...FIXED_HEADERS.slice(4)]
   const row = ['TC001', `${definition.name} case 1`, '[]', definition.actions.map((action) => action.ruleText || '').filter(Boolean).join('\n')]
-  row.push(...variables.map(() => ''))
+  row.push(...variables.map((item) => item.defaultValue ?? ''))
   row.push('assert visible text="Replace with expected result"', 'normal', `workflow-v${workflowVersion}`)
   return serializeCsv([headers, row])
 }

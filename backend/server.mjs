@@ -47,7 +47,9 @@ import { runExploration } from './exploration/explorationRunner.mjs'
 import { generateTaskPlan, PlanningError } from './planning/taskPlanning.mjs'
 import { parseTestCaseCsv } from './browserTests/csvImport.mjs'
 import { compileTestCase } from './browserTests/interpreter.mjs'
-import { applyReviewedWorkflowLocators, workflowStepsMatch } from './workflows/workflowDefinition.mjs'
+import { applyReviewedWorkflowLocators } from './workflows/workflowDefinition.mjs'
+import { saveWorkflowDefinition, validateForApplication, buildWorkflowStepText, actionToRuleText } from './workflows/workflowAuthoring.mjs'
+import { generateWorkflowCsvTemplate } from './workflows/csvTemplate.mjs'
 import { cancelBrowserTestExecution, startBrowserTestExecution, waitForBrowserTestLogin } from './browserTests/execution.mjs'
 import { beginWorkflowCapture, cancelWorkflowCapture, finishWorkflowCapture, getWorkflowCapture, getWorkflowTemplateForApplication, navigateWorkflowCapture, pauseWorkflowCapture, resumeWorkflowCapture, saveReviewedWorkflowCapture, startWorkflowCaptureForApplication } from './browserTests/workflowRecorder.mjs'
 import { isAuthorizedHrRequest, isRegisteredHcmApp } from './integrations/oracleHcm/hrAccess.mjs'
@@ -509,6 +511,20 @@ const server = createServer(async (request, response) => {
       return template ? json(response, 200, template) : json(response, 404, { error: 'No workflow has been recorded for this application yet.' })
     } catch (error) { return phase1Error(response, error) }
   }
+  const workflowAuthoringMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/workflow-template\/(validate|preview|save)$/)
+  if (workflowAuthoringMatch && request.method === 'POST') {
+    const [, applicationId, operation] = workflowAuthoringMatch
+    try {
+      const body = await readJson(request)
+      const { definition, stepsText } = await validateForApplication(applicationId, body)
+      if (operation === 'validate') return json(response, 200, { valid: true, actionCount: definition.actions.length, variableCount: definition.variables.length, hasAssertion: definition.actions.some((action) => action.action.startsWith('assert_')), stepsText })
+      if (operation === 'preview') {
+        const actions = definition.actions.map((action) => ({ ...action, ruleText: actionToRuleText(action) }))
+        return json(response, 200, { csv_template: generateWorkflowCsvTemplate({ name: definition.name, variables: definition.variables, actions }, definition.version || 1), stepsText })
+      }
+      return json(response, 200, await saveWorkflowDefinition(applicationId, body))
+    } catch (error) { return json(response, 400, { error: sanitizedError(error), code: error.code || 'WORKFLOW_VALIDATION_ERROR' }) }
+  }
   const workflowVersionsMatch = pathname.match(/^\/api\/applications\/([a-zA-Z0-9_-]+)\/workflow-versions$/)
   if (workflowVersionsMatch && request.method === 'GET') {
     try {
@@ -731,13 +747,12 @@ const server = createServer(async (request, response) => {
       const existingKeys = new Set(existing.map((key) => key.toLowerCase()))
       const compiled = parsed.rows.map((row) => {
         const errors = [...row.errors]
-        if (selectedWorkflow && !workflowStepsMatch(row.rawSteps, selectedWorkflow.steps_text)) errors.push('CSV steps differ from the selected saved workflow version. Re-record or review the workflow before changing actions.')
         if (existingKeys.has(row.testCaseId.toLowerCase())) errors.push('This test case ID already exists for the selected application.')
         let plan = null
         if (!errors.length) {
           try {
             plan = compileTestCase(row, application)
-            if (selectedWorkflow) applyReviewedWorkflowLocators(plan, selectedWorkflow)
+            if (selectedWorkflow) applyReviewedWorkflowLocators(plan, selectedWorkflow, row.testData)
           } catch (error) { errors.push(error.message || 'Test steps could not be interpreted.') }
         }
         if (errors.length) rowErrors.push({ rowNumber: row.rowNumber, testCaseId: row.testCaseId || null, errors })
@@ -757,7 +772,7 @@ const server = createServer(async (request, response) => {
         }
       })
       const globalErrors = [...parsed.errors]
-      if (compiled.length === 0) globalErrors.push('CSV must include at least one test case row.')
+      if (compiled.length === 0 && globalErrors.length === 0) globalErrors.push('CSV must include at least one test case row.')
       if (browserTestPreview) {
         return json(response, 200, {
           valid: globalErrors.length === 0 && rowErrors.length === 0 && compiled.length > 0,

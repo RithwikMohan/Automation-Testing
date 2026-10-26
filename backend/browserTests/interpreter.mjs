@@ -18,18 +18,21 @@ function parseLocator(raw, lineNumber) {
   const value = raw.trim()
 
   // Strict: role=button[name="..."]
-  let match = value.match(/^role=([a-zA-Z][a-zA-Z0-9-]{0,30})\[name="([^"\n]{1,120})"\]$/)
+  let match = value.match(/^role=([a-zA-Z][a-zA-Z0-9-]{0,30})\[name=("(?:\\.|[^"\\]){1,400}")\]$/)
   if (match) {
     if (!SUPPORTED_ROLES.has(match[1])) throw new Error('Step ' + lineNumber + ': unsupported ARIA role "' + match[1] + '". Supported: ' + [...SUPPORTED_ROLES].join(', ') + '.')
-    return { kind: 'role', role: match[1], name: match[2] }
+    try { return { kind: 'role', role: match[1], name: JSON.parse(match[2]) } } catch { throw new Error('Step ' + lineNumber + ': invalid quoted role name.') }
   }
 
   // Strict: text="...", label="...", placeholder="...", testid="..."
-  match = value.match(/^(text|label|placeholder|testid|id|name)="([^"\n]{1,160})"$/)
-  if (match) return { kind: match[1], value: match[2] }
+  match = value.match(/^(text|label|placeholder|testid|id|name)=("(?:\\.|[^"\\]){1,500}")$/)
+  if (match) { try { const decoded = JSON.parse(match[2]); if (decoded.length <= 160) return { kind: match[1], value: decoded } } catch {} }
+
+  match = value.match(/^xpath=("(?:\\.|[^"\\]){1,502}")$/)
+  if (match) { try { return { kind: 'xpath', value: JSON.parse(match[1]) } } catch {} }
 
   // Strict: css=#id or css=.class
-  match = value.match(/^css=(#[a-zA-Z][\w-]{0,100}|\.[a-zA-Z][\w-]{0,100})$/)
+  match = value.match(/^css=(.{1,500})$/)
   if (match) return { kind: 'css', value: match[1] }
 
   throw new Error(
@@ -44,7 +47,7 @@ function parseNaturalLocator(phrase, lineNumber) {
   const trimmed = phrase.trim()
 
   // Explicit strict locators take priority
-  if (/^(role=|text=|label=|placeholder=|testid=|id=|name=|css=)/.test(trimmed)) {
+  if (/^(role=|text=|label=|placeholder=|testid=|id=|name=|css=|xpath=)/.test(trimmed)) {
     return parseLocator(trimmed, lineNumber)
   }
 
@@ -117,21 +120,25 @@ function parseDataReference(value, lineNumber) {
 function parseAssertion(text, lineNumber) {
   const t = text.trim()
 
+  let valueMatch = t.match(/^assert\s+value\s+(.+?)\s*<-\s*(\$\{test_data\.[a-zA-Z][a-zA-Z0-9_]{0,63}\})$/i)
+  if (valueMatch) return { action: 'assert_value', locator: parseNaturalLocator(valueMatch[1], lineNumber), dataKey: parseDataReference(valueMatch[2], lineNumber) }
+
   // assert visible <locator> — strict form
   let match = t.match(/^assert\s+visible\s+(.+)$/i)
   if (match) return { action: 'assert_visible', locator: parseNaturalLocator(match[1], lineNumber) }
 
   // assert text <locator> contains "..."
-  match = t.match(/^assert\s+text\s+(.+?)\s+contains\s+"([^"\n]{1,300})"$/i)
-  if (match) return { action: 'assert_text', locator: parseNaturalLocator(match[1], lineNumber), expected: match[2] }
+  match = t.match(/^assert\s+text\s+(.+?)\s+contains\s+("(?:\\.|[^"\\]){1,600}")$/i)
+  if (match) { try { return { action: 'assert_text', locator: parseNaturalLocator(match[1], lineNumber), expected: JSON.parse(match[2]) } } catch { throw new Error('Step ' + lineNumber + ': invalid quoted assertion text.') } }
 
   // assert url contains/equals "..."
-  match = t.match(/^assert\s+(?:that\s+)?(?:the\s+)?url\s+(contains|equals)\s+"([^"\n]{1,500})"$/i)
+  match = t.match(/^assert\s+(?:that\s+)?(?:the\s+)?url\s+(contains|equals)\s+("(?:\\.|[^"\\]){1,1000}")$/i)
   if (match) {
-    if (match[2].includes('?') || match[2].includes('#') || /^https?:\/\//i.test(match[2])) {
+    const expected = JSON.parse(match[2])
+    if (expected.includes('?') || expected.includes('#') || /^https?:\/\//i.test(expected)) {
       throw new Error('Step ' + lineNumber + ': URL assertions must use a path without query strings or fragments.')
     }
-    return { action: 'assert_url', operator: match[1].toLowerCase(), expected: match[2] }
+    return { action: 'assert_url', operator: match[1].toLowerCase(), expected }
   }
 
   // assert that the <locator> is visible (natural language)
