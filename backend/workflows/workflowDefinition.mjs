@@ -127,13 +127,14 @@ export function workflowStepsMatch(candidate, savedSteps) {
   return normalize(candidate) === normalize(savedSteps)
 }
 
-export function applyReviewedWorkflowLocators(plan, workflow, testData = {}) {
+export function applyReviewedWorkflowLocators(plan, workflow, testData = null) {
   if (!plan || !Array.isArray(plan.actions) || !workflow || !Array.isArray(workflow.action_plan)) throw new Error('The selected saved workflow definition is invalid.')
+  const filterByTestData = Boolean(testData && typeof testData === 'object' && Object.keys(testData).length > 0)
   const needsValue = (action) => ['fill', 'select', 'assert_value'].includes(action.action) && action.optionLabel === undefined
-  const hasValue = (action) => String(testData[action.variableKey || action.dataKey] ?? '').trim().length > 0
-  const reviewedActions = workflow.action_plan.filter((action) => !needsValue(action) || hasValue(action))
-  plan.actions = plan.actions.filter((action) => !needsValue(action) || hasValue(action))
-  if (plan.actions.length < reviewedActions.length) throw new Error('The imported steps must include the selected workflow actions for the CSV fields provided.')
+  const hasValue = (action) => String(testData?.[action.variableKey || action.dataKey] ?? '').trim().length > 0
+  const reviewedActions = filterByTestData ? workflow.action_plan.filter((action) => !needsValue(action) || hasValue(action)) : workflow.action_plan
+  plan.actions = filterByTestData ? plan.actions.filter((action) => !needsValue(action) || hasValue(action)) : plan.actions
+  if (plan.actions.length < reviewedActions.length) throw new Error('The imported steps do not contain every action from the selected workflow.')
   const trailingActions = plan.actions.slice(reviewedActions.length)
   if (trailingActions.some((action) => !action.action.startsWith('assert_'))) throw new Error('The imported steps contain an interactive action outside the selected workflow version.')
   for (let index = 0; index < reviewedActions.length; index += 1) {
@@ -147,7 +148,7 @@ export function applyReviewedWorkflowLocators(plan, workflow, testData = {}) {
       if (compiled.operator !== reviewed.operator || compiled.expected !== reviewed.expected) throw new Error(`CSV URL assertion ${index + 1} differs from the selected workflow.`)
     } else {
       const variableKey = reviewed.variableKey || reviewed.dataKey
-      if (['fill', 'select', 'assert_value'].includes(reviewed.action) && compiled.dataKey !== variableKey) throw new Error(`CSV step ${index + 1} uses a different workflow field than the selected version.`)
+      if (['fill', 'select', 'assert_value'].includes(reviewed.action) && variableKey && compiled.dataKey !== variableKey) throw new Error(`CSV step ${index + 1} uses a different workflow field than the selected version.`)
       if (reviewed.action === 'select' && compiled.optionLabel !== reviewed.optionLabel) throw new Error(`CSV select step ${index + 1} differs from the selected workflow.`)
       if (reviewed.action === 'assert_text' && compiled.expected !== reviewed.expected) throw new Error(`CSV text assertion ${index + 1} differs from the selected workflow.`)
       if (reviewed.action === 'wait_visible' && compiled.timeoutMs !== reviewed.timeoutMs) throw new Error(`CSV wait step ${index + 1} differs from the selected workflow.`)

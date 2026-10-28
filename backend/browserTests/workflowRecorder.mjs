@@ -422,7 +422,7 @@ export async function startWorkflowCapture(application, options = {}) {
       const loginPost = isManualLoginPostAllowed({ method: request.method(), targetUrl: url, contentType, accessControlRequestMethod, isDocumentNavigation: request.isNavigationRequest() && request.resourceType() === 'document', manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin), manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive })
       const captureWrite = isCapturedFormWrite(session, request.method(), url, contentType)
       const oracleReadPostback = isCapturedOracleReadPostback(session, request.method(), url, contentType)
-      if (!session.captureActive && !['GET', 'HEAD'].includes(request.method()) && !loginPost && !captureWrite && !oracleReadPostback) return blocked('request method is not allowed by the active manual-login or reviewed-form policy')
+      if (!['GET', 'HEAD'].includes(request.method()) && !loginPost && !captureWrite && !oracleReadPostback) return blocked('request method is not allowed by the active manual-login or reviewed-form policy')
       if (captureWrite && !oracleReadPostback && session.lastActionIndex >= 0) {
         const action = session.actions[session.lastActionIndex]
         if (action && ['click', 'create', 'update', 'delete'].includes(action.action) && !action.writeAuthorization && session.navOrigins.has(normalizeAllowedOrigin(url.origin))) {

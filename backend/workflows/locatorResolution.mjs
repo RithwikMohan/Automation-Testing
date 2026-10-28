@@ -112,7 +112,7 @@ async function resolveOracleSelectByLabel(page, candidate) {
 }
 
 async function resolveOracleEmployeeFillByLabel(page, action, candidate) {
-  if (action?.action !== 'fill' || candidate?.kind !== 'label') return null
+  if (!['fill', 'select'].includes(action?.action) || candidate?.kind !== 'label') return null
   const label = String(candidate.value || '')
   if (!['Legal Employer', 'Business Unit'].includes(label)) return null
   let employeeWizard = false
@@ -140,8 +140,8 @@ async function resolveOracleEmployeeFillByLabel(page, action, candidate) {
   // widget. Its visible label is not always associated with the input on
   // FndOverview, so use the same input signal as the successful runner.
   const selector = label === 'Legal Employer'
-    ? 'input[role="combobox"][aria-label*="Legal Employer" i], input[id$="selectOneChoice3::content"]'
-    : 'input[role="combobox"][aria-label*="Business Unit" i]'
+    ? 'input[role="combobox"][aria-label*="Legal Employer" i], input[id*="selectOneChoice"][id$="::content"], input[id$="selectOneChoice3::content"]'
+    : 'input[role="combobox"][aria-label*="Business Unit" i], input[id*="BusinessUnit" i][id$="::content"]'
   const matches = []
   for (const frame of frames) {
     const locator = frame.locator(selector)
@@ -150,8 +150,73 @@ async function resolveOracleEmployeeFillByLabel(page, action, candidate) {
       if (await match.isVisible()) matches.push(match)
     }
   }
+  if (!matches.length) {
+    for (const frame of frames) {
+      const labels = frame.locator('label').filter({ hasText: label })
+      for (let index = 0; index < await labels.count(); index += 1) {
+        const forId = await labels.nth(index).getAttribute('for').catch(() => null)
+        if (forId) {
+          const input = frame.locator(`#${CSS.escape(forId)}`)
+          if (await input.count() === 1 && await input.isVisible()) matches.push(input)
+        }
+      }
+    }
+  }
   if (matches.length > 1) throw Object.assign(new Error(`Oracle employee field matched multiple visible inputs for "${label}".`), { code: 'LOCATOR_AMBIGUOUS', candidate, matchCount: matches.length })
   if (matches.length === 1) return { locator: matches[0], candidate, tag: await matches[0].evaluate((element) => element.tagName.toLowerCase()) }
+  return null
+}
+
+async function resolveOracleSignInField(page, action, candidate) {
+  if (action?.action !== 'fill' || candidate?.kind !== 'label') return null
+  const value = String(candidate?.value || '').trim()
+  const isUsername = /^user[\s_-]*name$/i.test(value) || action?.dataKey === 'username'
+  const isPassword = /^password$/i.test(value) || action?.credentialInput === true || action?.dataKey === 'password'
+  if (!isUsername && !isPassword) return null
+
+  let isAuth = false
+  try {
+    const url = new URL(page.url())
+    isAuth = /identity\.oraclecloud\.com/i.test(url.hostname)
+      || /\/(?:ui\/v1\/signin|signin|login)\b/i.test(url.pathname)
+  } catch {}
+  if (!isAuth) return null
+
+  const frames = typeof page.frames === 'function' ? page.frames() : [page]
+  const queries = isUsername
+    ? [
+        (frame) => frame.getByLabel('User Name', { exact: true }),
+        (frame) => frame.getByLabel('Username', { exact: true }),
+        (frame) => frame.getByLabel(/user[\s_-]*name/i),
+        (frame) => frame.getByPlaceholder(/user[\s_-]*name/i),
+        (frame) => frame.locator('#idcs-signin-basic-signin-form-username, input[name="username" i], input[id*="username" i]'),
+      ]
+    : [
+        (frame) => frame.getByLabel('Password', { exact: true }),
+        (frame) => frame.getByLabel(/password/i),
+        (frame) => frame.getByPlaceholder(/password/i),
+        (frame) => frame.locator('#idcs-signin-basic-signin-form-password, input[type="password"], input[name="password" i]'),
+      ]
+
+  for (const query of queries) {
+    const matches = []
+    for (const frame of frames) {
+      try {
+        if (typeof frame.isDetached === 'function' && frame.isDetached()) continue
+        const locator = query(frame)
+        const count = await locator.count()
+        for (let i = 0; i < count; i += 1) {
+          const item = locator.nth(i)
+          if (await item.isVisible()) matches.push(item)
+        }
+      } catch (err) {
+        if (!isDetachedFrameError(err)) throw err
+      }
+    }
+    if (matches.length === 1) {
+      return { locator: matches[0], candidate, tag: await matches[0].evaluate((el) => el.tagName.toLowerCase()) }
+    }
+  }
   return null
 }
 
@@ -171,6 +236,8 @@ export async function resolveWorkflowLocator(page, action, { expectedTag, timeou
       }
       const oracleEmployeeField = await resolveOracleEmployeeFillByLabel(page, action, candidate)
       if (oracleEmployeeField) return oracleEmployeeField
+      const oracleSignInField = await resolveOracleSignInField(page, action, candidate)
+      if (oracleSignInField) return oracleSignInField
       // Manual capture observes clicks in every frame. Replay must search those
       // same frames, while preferring a visible match over hidden responsive
       // duplicates in the top document.
@@ -195,6 +262,45 @@ export async function resolveWorkflowLocator(page, action, { expectedTag, timeou
         }
       }
       if (matches.length > 1) throw Object.assign(new Error(`Locator is ambiguous: ${matches.length} visible frame matches for ${candidate.kind}.`), { code: 'LOCATOR_AMBIGUOUS', candidate, matchCount: matches.length })
+      if (!matches.length && candidate.kind === 'text') {
+        const textVal = String(candidate.value || '').trim()
+        const cleanVal = textVal.replace(/[.\s]+$/, '')
+        const queries = []
+        if (cleanVal !== textVal) {
+          queries.push((f) => f.getByText(cleanVal, { exact: true }))
+        }
+        queries.push((f) => f.getByText(cleanVal || textVal, { exact: false }))
+        const escaped = (cleanVal || textVal).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        queries.push((f) => f.getByText(new RegExp(escaped, 'i')))
+        if (/request was submitted|submitted/i.test(textVal)) {
+          queries.push((f) => f.locator('[role="dialog"], [role="alertdialog"], .af_dialog, .af_panelWindow').filter({ hasText: /submitted/i }))
+        }
+
+        for (const query of queries) {
+          for (const frame of frames) {
+            try {
+              if (typeof frame.isDetached === 'function' && frame.isDetached()) continue
+              const relaxed = query(frame)
+              const count = await relaxed.count()
+              const visible = []
+              for (let i = 0; i < count; i++) {
+                const el = relaxed.nth(i)
+                if (await el.isVisible()) visible.push(el)
+              }
+              if (visible.length === 1) {
+                matches.push(visible[0])
+                break
+              } else if (visible.length > 1) {
+                matches.push(visible[visible.length - 1])
+                break
+              }
+            } catch (err) {
+              if (isDetachedFrameError(err)) continue
+            }
+          }
+          if (matches.length > 0) break
+        }
+      }
       if (!matches.length) {
         diagnostics.add(candidate.kind)
         continue

@@ -179,11 +179,24 @@ async function selectWorkflowOption(page, locator, value, timeoutMs) {
   const searchInput = tag === 'input' ? locator : locator.locator('input').first()
   const inputCount = await searchInput.count().catch(() => 0)
   const readOnly = inputCount ? await searchInput.getAttribute('readonly').catch(() => null) : null
-  const arrowSelector = '.oj-searchselect-arrow, .oj-searchselect-open-icon, .oj-select-arrow, [class*="searchselect-arrow"], [class*="select-arrow"]'
+  const arrowSelector = '.oj-searchselect-arrow, .oj-searchselect-open-icon, .oj-select-arrow, [class*="searchselect-arrow"], [class*="select-arrow"], [id$="::drop"], [id$="::lov-btn"], [id$="::glyph"], .af_selectOneChoice_drop-icon, .af_inputComboboxListOfValues_lov-icon, a[title*="Search"], a[title*="Select"]'
   const isExpanded = async () => await searchInput.getAttribute('aria-expanded').catch(() => null) === 'true'
     || await locator.getAttribute('aria-expanded').catch(() => null) === 'true'
   const openDropdown = async () => {
     if (await isExpanded()) return
+    const locatorId = await locator.getAttribute('id').catch(() => null)
+    if (locatorId && /::content$/.test(locatorId)) {
+      const dropId = locatorId.replace(/::content$/, '::drop')
+      const lovId = locatorId.replace(/::content$/, '::lov-btn')
+      const specificArrow = locator.page().locator(`[id="${dropId}"], [id="${lovId}"]`)
+      if (await specificArrow.count().catch(() => 0)) {
+        const arrow = specificArrow.first()
+        if (await arrow.isVisible().catch(() => false)) {
+          await arrow.click({ timeout: timeoutMs })
+          return
+        }
+      }
+    }
     let scope = locator
     for (let level = 0; level < 4; level += 1) {
       const arrows = scope.locator(arrowSelector)
@@ -225,7 +238,14 @@ async function selectWorkflowOption(page, locator, value, timeoutMs) {
   } catch (error) {
     if (error.code === 'AMBIGUOUS_LOCATOR') throw error
   }
-  if (inputCount && readOnly === null) await searchInput.fill(value, { timeout: Math.min(timeoutMs, 3000) }).catch(() => {})
+  if (inputCount && readOnly === null) {
+    if (typeof searchInput.pressSequentially === 'function') {
+      await searchInput.fill('', { timeout: Math.min(timeoutMs, 2000) }).catch(() => {})
+      await searchInput.pressSequentially(value, { delay: 30, timeout: Math.min(timeoutMs, 3000) }).catch(() => {})
+    } else {
+      await searchInput.fill(value, { timeout: Math.min(timeoutMs, 3000) }).catch(() => {})
+    }
+  }
   await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
   await openDropdown()
   await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
@@ -262,11 +282,189 @@ function isOracleEmployeeWizardPage(app, pageUrl) {
   } catch { return false }
 }
 
+async function waitForOracleAdfSynchronized(page, timeoutMs = 30_000) {
+  if (!page) return true
+  const deadline = Date.now() + timeoutMs
+  await page.waitForTimeout(400)
+  while (Date.now() < deadline) {
+    try {
+      const isSynchronized = await page.evaluate(() => {
+        try {
+          if (window.AdfPage && window.AdfPage.PAGE) {
+            if (typeof window.AdfPage.PAGE.isSynchronizedWithServer === 'function') {
+              if (!window.AdfPage.PAGE.isSynchronizedWithServer()) return false
+            }
+          }
+          const busyElem = document.querySelector('.p_AFBusy, #_af_busy, [id*="_af_busy"]')
+          if (busyElem && window.getComputedStyle(busyElem).display !== 'none') return false
+          return true
+        } catch { return true }
+      })
+      if (isSynchronized) return true
+    } catch {}
+    await page.waitForTimeout(300)
+  }
+  return false
+}
+
+async function waitForOracleReviewStep(page, timeoutMs = 30_000) {
+  if (!page) return true
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const isReview = await page.evaluate(() => {
+      try {
+        const h1 = document.querySelector('h1, .af_panelHeader_title-text')
+        if (h1 && /Review/i.test(h1.textContent || '')) return true
+        const currentStep = document.querySelector('[aria-label*="Review"][aria-label*="Current"], [title*="Review"][title*="Current"]')
+        if (currentStep) return true
+        const trainText = document.body.innerText || ''
+        if (/Review Step:\s*Current/i.test(trainText)) return true
+        return false
+      } catch { return false }
+    })
+    if (isReview) return true
+
+    // Check if Submit button is already enabled
+    const submitBtn = page.getByRole('button', { name: 'Submit', exact: true }).first()
+    const ariaDisabled = await submitBtn.getAttribute('aria-disabled').catch(() => null)
+    if (ariaDisabled === 'false') return true
+
+    // If still on Compensation and Other Information step, ADF might have dropped the Next click
+    const isCompensation = await page.evaluate(() => {
+      try {
+        const text = document.body.innerText || ''
+        return /Compensation and Other Information Step:\s*Current/i.test(text)
+          || /Hire an Employee:\s*Compensation and Other Information/i.test(text)
+      } catch { return false }
+    })
+
+    if (isCompensation) {
+      await waitForOracleAdfSynchronized(page, 5_000)
+      const nextBtn = page.getByRole('button', { name: 'Next', exact: true }).first()
+      const nextDisabled = await nextBtn.getAttribute('aria-disabled').catch(() => null)
+      if (nextDisabled !== 'true' && await nextBtn.isVisible().catch(() => false)) {
+        await nextBtn.click().catch(() => {})
+        await page.waitForTimeout(1000)
+        await waitForOracleAdfSynchronized(page, 10_000)
+      }
+    }
+
+    await page.waitForTimeout(500)
+  }
+  return false
+}
+
+async function waitForOracleSubmitEnabled(locator, timeoutMs, throwIfCancelled) {
+  const page = typeof locator.page === 'function' ? locator.page() : null
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (typeof throwIfCancelled === 'function') throwIfCancelled()
+    if (page) {
+      const isCompensation = await page.evaluate(() => {
+        try {
+          const text = document.body.innerText || ''
+          return /Compensation and Other Information Step:\s*Current/i.test(text)
+            || /Hire an Employee:\s*Compensation and Other Information/i.test(text)
+        } catch { return false }
+      })
+      if (isCompensation) {
+        await waitForOracleReviewStep(page, Math.min(15_000, Math.max(1_000, deadline - Date.now())))
+      }
+    }
+    const ariaDisabled = await locator.getAttribute('aria-disabled').catch(() => null)
+    const classList = await locator.getAttribute('class').catch(() => '')
+    const isEnabled = await locator.isEnabled().catch(() => false)
+    if (ariaDisabled !== 'true' && !/\bp_AFDisabled\b/i.test(classList) && isEnabled) return true
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  return false
+}
+
+function isOracleAuthPage(app, pageUrl) {
+  if (!isOracleHcmApplication(app)) return false
+  try {
+    const url = new URL(pageUrl)
+    return /identity\.oraclecloud\.com/i.test(url.hostname)
+      || /\/(?:ui\/v1\/signin|signin|login)\b/i.test(url.pathname)
+  } catch { return false }
+}
+
 function fieldLocatorTimeout(page, app, defaultTimeoutMs) {
   if (!isOracleHcmApplication(app)) return defaultTimeoutMs
-  return isOracleEmployeeWizardPage(app, page.url())
-    ? Math.max(defaultTimeoutMs, 30_000)
+  const url = page.url()
+  return (isOracleEmployeeWizardPage(app, url) || isOracleAuthPage(app, url))
+    ? Math.max(defaultTimeoutMs, 45_000)
     : defaultTimeoutMs
+}
+
+async function readOracleFieldValue(locator, timeoutMs) {
+  const inputVal = await locator.inputValue({ timeout: timeoutMs }).catch(() => '')
+  if (inputVal && inputVal.trim()) return inputVal.trim()
+  const inner = await locator.innerText({ timeout: timeoutMs }).catch(() => '')
+  if (inner && inner.trim()) return inner.trim()
+  const title = await locator.getAttribute('title').catch(() => '')
+  if (title && title.trim()) return title.trim()
+  const ariaLabel = await locator.getAttribute('aria-label').catch(() => '')
+  if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim()
+  return ''
+}
+
+async function fillOracleEmployeeComboboxField(page, locator, action, value, locatorTimeoutMs, testData) {
+  // Clear any existing value and focus the combobox input only if already non-empty
+  try {
+    const existing = await readOracleFieldValue(locator, 1000)
+    if (existing) {
+      await locator.click({ timeout: locatorTimeoutMs })
+      await locator.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {})
+      await locator.press('Backspace').catch(() => {})
+      await locator.fill('', { timeout: locatorTimeoutMs }).catch(() => {})
+    } else {
+      await locator.click({ timeout: locatorTimeoutMs }).catch(() => {})
+    }
+  } catch {}
+
+  // Type sequentially so Oracle fires keyboard events and displays its auto-suggest popup
+  if (typeof locator.pressSequentially === 'function') {
+    await locator.pressSequentially(value, { delay: 30, timeout: locatorTimeoutMs }).catch(() => {})
+  } else {
+    await locator.fill(value, { timeout: locatorTimeoutMs }).catch(() => {})
+  }
+  await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+
+  // Commit the suggestion:
+  // 1. Try to click the suggestion from the auto-suggest popup
+  try {
+    await clickOracleSelectOption(page, value, Math.min(locatorTimeoutMs, 3000))
+  } catch {
+    // 2. If no option was clicked, press Enter to commit the active suggestion in the Oracle combobox
+    try {
+      await locator.press('Enter', { timeout: 1000 })
+      await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+    } catch {}
+  }
+
+  // 3. Re-read the field value to verify whether Oracle retained it
+  let refreshedLocator = await uniqueActionLocator(page, action, locatorTimeoutMs, testData).catch(() => locator)
+  let retainedValue = await readOracleFieldValue(refreshedLocator, locatorTimeoutMs)
+
+  // 4. If Oracle cleared it or didn't commit, fall back to opening the dropdown via selectWorkflowOption
+  if (retainedValue.trim() !== value.trim()) {
+    try {
+      await selectWorkflowOption(page, refreshedLocator, value, locatorTimeoutMs)
+      await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+      refreshedLocator = await uniqueActionLocator(page, action, locatorTimeoutMs, testData).catch(() => refreshedLocator)
+      retainedValue = await readOracleFieldValue(refreshedLocator, locatorTimeoutMs)
+    } catch {}
+  }
+
+  // 5. If it still didn't retain the value, throw the error
+  if (retainedValue.trim() !== value.trim()) {
+    const fieldName = action.dataKey === 'legal_employer' ? 'Legal Employer' : action.dataKey === 'business_unit' ? 'Business Unit' : 'field'
+    throw new BrowserTestError(
+      'ORACLE_FIELD_VALUE_CLEARED',
+      `Oracle cleared the ${fieldName} value after it was typed. The workflow stopped before continuing.`
+    )
+  }
 }
 
 async function blurFilledField(locator, timeoutMs) {
@@ -508,8 +706,11 @@ export async function executeBrowserTest(executionId, options = {}) {
     const cachedAuth = reuseAuthenticatedSession && !planHasCsvCredentials ? approvedSessionStates.get(String(app.application_id)) : null
     const cachedStorageState = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.state : undefined
     if (cachedAuth && !cachedStorageState) approvedSessionStates.delete(String(app.application_id))
+    const shouldRunHeadless = typeof options.headless === 'boolean'
+      ? options.headless
+      : (process.env.HEADLESS === 'false' ? false : (app.application_auth_method === 'manual' && !cachedStorageState ? false : process.env.HEADLESS === 'true'))
     const launchOptions = {
-      headless: typeof options.headless === 'boolean' ? options.headless : app.application_auth_method === 'manual' && !cachedStorageState ? false : process.env.HEADLESS !== 'false',
+      headless: shouldRunHeadless,
       timeout: 20_000,
       proxy: { server: proxy.proxyUrl, bypass: '<-loopback>' },
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
@@ -783,37 +984,55 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = { url: safePageUrl(page) }
           expected = { url: action.url }
         } else if (action.action === 'click') {
-          const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
+          const clickTimeoutMs = isOracleHcmApplication(app)
+            ? Math.max(actionTimeoutMs, 30_000)
+            : actionTimeoutMs
+          const isOracleSubmit = isOracleHcmApplication(app)
+            && action.locator?.kind === 'role'
+            && action.locator.role === 'button'
+            && /^Submit$/i.test(action.locator.name || '')
+            && isOracleEmployeeWizardPage(app, page.url())
+          if (isOracleSubmit) {
+            const submitReadyTimeout = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            await waitForOracleReviewStep(page, submitReadyTimeout)
+          }
+          const locator = await uniqueActionLocator(page, action, clickTimeoutMs, testCase.test_data)
           const isOracleEmployeeNext = isOracleEmployeeWizardPage(app, page.url())
             && action.locator?.kind === 'role'
             && action.locator.role === 'button'
             && /^Next$/i.test(action.locator.name || '')
           if (isOracleEmployeeNext) {
-            const legalEmployerAction = plan.actions.find((candidate) => candidate.action === 'fill' && candidate.dataKey === 'legal_employer')
+            const legalEmployerIndex = plan.actions.findIndex((candidate) => candidate.action === 'fill' && candidate.dataKey === 'legal_employer')
+            const firstNextIndex = legalEmployerIndex >= 0
+              ? plan.actions.findIndex((candidate, idx) => idx > legalEmployerIndex && candidate.action === 'click' && /^Next$/i.test(candidate.locator?.name || ''))
+              : -1
+            const isLegalEmployerStepNext = firstNextIndex >= 0 && plan.actions[firstNextIndex] === action
+            const legalEmployerAction = isLegalEmployerStepNext ? plan.actions[legalEmployerIndex] : null
             const legalEmployerValue = String(testCase.test_data.legal_employer ?? '').trim()
             if (legalEmployerAction && legalEmployerValue) {
-              const legalEmployerLocator = await uniqueActionLocator(page, legalEmployerAction, actionTimeoutMs, testCase.test_data)
-              const retainedValue = await legalEmployerLocator.inputValue({ timeout: actionTimeoutMs }).catch(() => '')
-              if (retainedValue.trim() !== legalEmployerValue) {
-                throw new BrowserTestError(
-                  'ORACLE_FIELD_VALUE_CLEARED',
-                  'Oracle cleared the Legal Employer value before Next. The workflow stopped without clicking Next; this required field will not accept typed text until an Oracle suggestion is committed.'
-                )
+              let legalEmployerLocator = await uniqueActionLocator(page, legalEmployerAction, 2000, testCase.test_data).catch(() => null)
+              if (legalEmployerLocator) {
+                let retainedValue = await readOracleFieldValue(legalEmployerLocator, actionTimeoutMs)
+                if (retainedValue.trim() !== legalEmployerValue) {
+                  try {
+                    await fillOracleEmployeeComboboxField(page, legalEmployerLocator, legalEmployerAction, legalEmployerValue, actionTimeoutMs, testCase.test_data)
+                    legalEmployerLocator = await uniqueActionLocator(page, legalEmployerAction, actionTimeoutMs, testCase.test_data).catch(() => legalEmployerLocator)
+                    retainedValue = await readOracleFieldValue(legalEmployerLocator, actionTimeoutMs)
+                  } catch {}
+                }
+                if (retainedValue.trim() !== legalEmployerValue) {
+                  throw new BrowserTestError(
+                    'ORACLE_FIELD_VALUE_CLEARED',
+                    'Oracle cleared the Legal Employer value before Next. The workflow stopped without clicking Next; this required field will not accept typed text until an Oracle suggestion is committed.'
+                  )
+                }
               }
             }
           }
-          const isOracleSubmit = isOracleHcmApplication(app)
-            && action.locator?.kind === 'role'
-            && action.locator.role === 'button'
-            && action.locator.name === 'Submit'
-            && /\/employment-addperson\/create\/employee\/?$/i.test(new URL(page.url()).pathname)
           if (isOracleSubmit) {
-            const submitReadyDeadline = Date.now() + Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
-            while (!(await locator.isEnabled().catch(() => false)) && Date.now() < submitReadyDeadline) {
-              throwIfCancelled()
-              await new Promise((resolve) => setTimeout(resolve, 250))
-            }
-            if (!(await locator.isEnabled().catch(() => false))) {
+            const submitReadyTimeout = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            const enabled = await waitForOracleSubmitEnabled(locator, submitReadyTimeout, throwIfCancelled)
+            if (!enabled) {
               throw new BrowserTestError('ORACLE_SUBMIT_DISABLED', 'Oracle reached the final employee wizard step, but Submit is still disabled. Complete any required Assignment fields or resolve the page validation before submitting.', 'FAILED')
             }
           }
@@ -857,6 +1076,21 @@ export async function executeBrowserTest(executionId, options = {}) {
               if (!isOracleGroupExpander || !/Timeout|intercepts pointer events|detached from the DOM/i.test(String(error?.message || error))) throw error
               await locator.focus({ timeout: actionTimeoutMs })
               await locator.press('Enter', { timeout: actionTimeoutMs })
+            }
+          }
+          if (isOracleEmployeeNext) {
+            await waitForOracleAdfSynchronized(page, Math.min(45_000, Math.max(actionTimeoutMs, 30_000)))
+            const nextAction = plan.actions[actionIndex + 1]
+            if (nextAction) {
+              const isNextAgain = nextAction.action === 'click' && /^Next$/i.test(nextAction.locator?.name || '')
+              const isSubmitNext = ['create', 'update', 'click'].includes(nextAction.action) && /^Submit$/i.test(nextAction.locator?.name || '')
+              if (isNextAgain || isSubmitNext) {
+                await page.waitForTimeout(1000)
+                await waitForOracleAdfSynchronized(page, 15_000)
+                if (isSubmitNext) {
+                  await waitForOracleReviewStep(page, Math.min(45_000, Math.max(actionTimeoutMs, 30_000)))
+                }
+              }
             }
           }
           const nextAction = plan.actions[actionIndex + 1]
@@ -906,7 +1140,22 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = 'Element clicked.'
           expected = locatorDescription(action.locator)
         } else if (['create', 'update', 'delete'].includes(action.action)) {
-          const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
+          const writeTimeoutMs = isOracleHcmApplication(app)
+            ? Math.max(actionTimeoutMs, 45_000)
+            : actionTimeoutMs
+          const isOracleSubmit = isOracleHcmApplication(app)
+            && /^Submit$/i.test(action.locator?.name || '')
+            && isOracleEmployeeWizardPage(app, page.url())
+          if (isOracleSubmit) {
+            await waitForOracleReviewStep(page, writeTimeoutMs)
+          }
+          const locator = await uniqueActionLocator(page, action, writeTimeoutMs, testCase.test_data)
+          if (isOracleSubmit) {
+            const enabled = await waitForOracleSubmitEnabled(locator, writeTimeoutMs, throwIfCancelled)
+            if (!enabled) {
+              throw new BrowserTestError('ORACLE_SUBMIT_DISABLED', 'Oracle reached the final employee wizard step, but Submit is still disabled. Complete any required Assignment fields or resolve the page validation before submitting.', 'FAILED')
+            }
+          }
           const form = await locator.evaluate((element) => {
             const owner = element.form || element.closest('form')
             if (!owner || owner.method.toUpperCase() !== 'POST') return null
@@ -925,9 +1174,9 @@ export async function executeBrowserTest(executionId, options = {}) {
               const target = new URL(response.url())
               return request.method() === 'POST' && target.origin === activeWriteAuthorization?.origin && target.pathname === activeWriteAuthorization?.path
             } catch { return false }
-          }, { timeout: 15000 }).catch(() => null)
+          }, { timeout: Math.min(60_000, Math.max(writeTimeoutMs, 30_000)) }).catch(() => null)
           try {
-            await locator.click({ timeout: actionTimeoutMs })
+            await locator.click({ timeout: writeTimeoutMs })
             writeResponse = await responseWait
           } finally {
             activeWriteAuthorization = null
@@ -951,28 +1200,14 @@ export async function executeBrowserTest(executionId, options = {}) {
             }
             if (searchPostback) activeWorkflowPostback = searchPostback
             try {
-              const isOracleEmployeeLegalEmployer = isOracleEmployeeWizardPage(app, page.url()) && action.dataKey === 'legal_employer'
-              try {
+              const isOracleEmployeeCombobox = isOracleEmployeeWizardPage(app, page.url())
+                && (['legal_employer', 'business_unit'].includes(action.dataKey) || action.locator?.role === 'combobox')
+              if (isOracleEmployeeCombobox) {
+                await fillOracleEmployeeComboboxField(page, locator, action, value, locatorTimeoutMs, testCase.test_data)
+              } else {
                 await locator.fill(value, { timeout: locatorTimeoutMs })
-              } catch (fillError) {
-                // Match the successful runner's keyboard fallback for custom
-                // Oracle inputs, without activating the dropdown arrow.
-                if (!isOracleEmployeeLegalEmployer || typeof locator.pressSequentially !== 'function') throw fillError
-                await locator.fill('', { timeout: locatorTimeoutMs })
-                await locator.click({ timeout: locatorTimeoutMs })
-                await locator.pressSequentially(value, { timeout: locatorTimeoutMs })
-              }
-              await blurFilledField(locator, locatorTimeoutMs)
-              await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
-              if (isOracleEmployeeLegalEmployer) {
-                const refreshedLocator = await uniqueActionLocator(page, action, locatorTimeoutMs, testCase.test_data)
-                const retainedValue = await refreshedLocator.inputValue({ timeout: locatorTimeoutMs }).catch(() => '')
-                if (retainedValue.trim() !== value.trim()) {
-                  throw new BrowserTestError(
-                    'ORACLE_FIELD_VALUE_CLEARED',
-                    'Oracle cleared the Legal Employer value after it was typed. The workflow stopped before continuing.'
-                  )
-                }
+                await blurFilledField(locator, locatorTimeoutMs)
+                await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
               }
               if (searchPostback) await page.waitForTimeout(250)
             } finally {
@@ -1001,8 +1236,9 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = action.action === 'check' ? 'Checkbox checked.' : 'Checkbox unchecked.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'wait_visible') {
-          const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
-          await locator.waitFor({ state: 'visible', timeout: action.timeoutMs })
+          const waitTimeout = Math.max(actionTimeoutMs, Number(action.timeoutMs) || 0)
+          const locator = await uniqueActionLocator(page, action, waitTimeout, testCase.test_data)
+          await locator.waitFor({ state: 'visible', timeout: waitTimeout })
           actual = 'Element became visible.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'read_text') {
@@ -1011,8 +1247,11 @@ export async function executeBrowserTest(executionId, options = {}) {
           actual = safeText(await locator.innerText({ timeout: actionTimeoutMs }), testCase.test_data)
           expected = { resultKey: action.resultKey }
         } else if (action.action === 'assert_visible') {
-          const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
-          await locator.waitFor({ state: 'visible', timeout: actionTimeoutMs })
+          const assertTimeout = isOracleHcmApplication(app)
+            ? Math.max(actionTimeoutMs, 30_000)
+            : actionTimeoutMs
+          const locator = await uniqueActionLocator(page, action, assertTimeout, testCase.test_data)
+          await locator.waitFor({ state: 'visible', timeout: assertTimeout })
           actual = 'Element is visible.'
           expected = locatorDescription(action.locator)
         } else if (action.action === 'assert_text') {

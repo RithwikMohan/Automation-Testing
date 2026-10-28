@@ -275,8 +275,8 @@ export function isOracleHcmReadPostAllowed({ method, targetUrl, contentType, app
   try { sameOrigin = normalizeAllowedOrigin(targetUrl.origin) === normalizeAllowedOrigin(applicationOrigin) } catch { return false }
   if (!sameOrigin) return false
   const type = String(contentType || '')
-  if (targetUrl.pathname === '/fscmUI/faces/AtkHomePageWelcome' && /^application\/x-www-form-urlencoded(?:;|$)/i.test(type)) return true
-  if (targetUrl.pathname === '/fscmUI/BIProxy' && /^application\/x-www-form-urlencoded(?:;|$)/i.test(type)) return true
+  if (['/fscmUI/faces/AtkHomePageWelcome', '/fscmUI/BIProxy', '/hcmUI/faces/FndOverview'].includes(targetUrl.pathname)
+    && /^application\/(?:x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i.test(type)) return true
   if (!/^application\/vnd\.oracle\.adf\.action\+json(?:;|$)/i.test(type)) return false
   if (/^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/(?:businessProcessTransactions\/action\/getConflictsForObjectObjectId|workerJourneys\/action\/findOrAssignContextualJourney)$/i.test(targetUrl.pathname)) return true
   if (/^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/personHeaders\/action\/getPeopleEnterpriseInfo$/i.test(targetUrl.pathname)) return true
@@ -293,7 +293,7 @@ export function isOracleHcmReadPostAllowed({ method, targetUrl, contentType, app
   const customChangePath = new RegExp(`${apiVersionPrefix.source}customChangeMethods$`, 'i').test(targetUrl.pathname)
   // Oracle invokes these narrowly scoped onchange handlers to refresh
   // dependent employee-wizard fields before any employee Submit action.
-  return customChangePath && ['OnBusinessUnitChange', 'onLegalEmployerChange'].includes(operation)
+  return customChangePath && /^(?:onBusinessUnitChange|onLegalEmployerChange)$/i.test(operation)
 }
 
 async function readLimitedRequestBody(request, maxBytes = 64 * 1024) {
@@ -341,13 +341,22 @@ export function isManualLoginPostAllowed({ method, targetUrl, contentType, acces
   if (!(manualAuthOrigins instanceof Set)) {
     const pathIsObserved = manualAuthPaths instanceof Set && manualAuthPaths.has(target.pathname)
     if (!pathIsObserved) return false
+  } else if (manualAuthPaths instanceof Set && manualAuthPaths.size > 0) {
+    const pathIsObserved = manualAuthPaths.has(target.pathname)
+      || manualAuthPaths.has(target.href)
+      || manualAuthPaths.has(target.origin + target.pathname)
+    if (!pathIsObserved && isDocumentNavigation !== true && !/identity\.oraclecloud\.com$/i.test(target.hostname)) return false
   }
   // HTML form submissions used by federated identity providers are top-level
   // document navigations. Their enctype may be provider-specific; the active
   // login window and approved origin are the relevant scope for these requests.
   if (isDocumentNavigation === true) return true
   if (isPreflight) return true
-  return /^application\/(x-www-form-urlencoded|multipart\/form-data|json)(?:;|$)/i.test(String(contentType || ''))
+  const isJsonLogin = /identity\.oraclecloud\.com$/i.test(target.hostname) || target.pathname === '/ui/v1/signin'
+  const allowedTypes = isJsonLogin
+    ? /^application\/(?:x-www-form-urlencoded|multipart\/form-data|json)(?:;|$)/i
+    : /^application\/(?:x-www-form-urlencoded|multipart\/form-data)(?:;|$)/i
+  return allowedTypes.test(String(contentType || ''))
 }
 
 /** Permit a write only during its approved form-submit action and only to that form's exact primary-origin path. */

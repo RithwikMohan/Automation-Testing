@@ -1934,7 +1934,7 @@ function BrowserTestsPage() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([])
   const [recordingDisabledCaseIds, setRecordingDisabledCaseIds] = useState<string[]>([])
   const [queuedCases, setQueuedCases] = useState<BrowserTestCase[]>([])
-  const [runOptions, setRunOptions] = useState({ defaultTimeoutMs: 10000, recordVideo: true, captureScreenshotsOnFailure: true, stopOnFailure: false, recordingPolicy: 'show-all-values', reuseAuthenticatedSession: false })
+  const [runOptions, setRunOptions] = useState({ defaultTimeoutMs: 10000, recordVideo: true, captureScreenshotsOnFailure: true, stopOnFailure: false, recordingPolicy: 'show-all-values', reuseAuthenticatedSession: false, headed: true })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [workflowTemplate, setWorkflowTemplate] = useState<RecordedWorkflowTemplate | null>(null)
@@ -2043,7 +2043,7 @@ function BrowserTestsPage() {
     setBusy(true); setMessage('')
     try {
       const response = await fetch(API + '/api/browser-tests/cases/' + item.id + '/execute', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved, allowWrites, defaultTimeoutMs: runOptions.defaultTimeoutMs, recordVideo: runOptions.recordVideo && !recordingDisabledCaseIds.includes(item.id), recordingPolicy: runOptions.recordingPolicy, reuseAuthenticatedSession: runOptions.reuseAuthenticatedSession, captureScreenshotsOnFailure: runOptions.captureScreenshotsOnFailure }),
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approveInteractions: approved, allowWrites, defaultTimeoutMs: runOptions.defaultTimeoutMs, recordVideo: runOptions.recordVideo && !recordingDisabledCaseIds.includes(item.id), recordingPolicy: runOptions.recordingPolicy, reuseAuthenticatedSession: runOptions.reuseAuthenticatedSession, captureScreenshotsOnFailure: runOptions.captureScreenshotsOnFailure, headless: !runOptions.headed }),
       })
       const started = await response.json()
       if (!response.ok) throw new Error(started.error || 'Could not start this test.')
@@ -2161,6 +2161,7 @@ function BrowserTestsPage() {
       <p className="browser-test-subtitle">“Show all values” includes passwords as plain text in saved recordings and failure screenshots. Keep those files private or choose a masking option.</p>
         <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.captureScreenshotsOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, captureScreenshotsOnFailure: event.target.checked }))} /> Screenshots on failure</label>
         <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.stopOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, stopOnFailure: event.target.checked }))} /> Stop on first failure</label>
+        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.headed} onChange={(event) => setRunOptions((current) => ({ ...current, headed: event.target.checked }))} /> Show browser window</label>
       </div>
       {preview.length > 0 && <><div className="browser-test-preview-title"><strong>{fileName}</strong><span>{preview.length} cases · {previewErrors.length ? previewErrors.length + ' validation errors' : 'all rows valid'}</span></div>
         <div className="table-wrap"><table><thead><tr><th>Select</th><th>Row / ID</th><th>Case</th><th>Priority</th><th>Data keys</th><th>Plan actions</th><th>Validation</th></tr></thead><tbody>{preview.map((row) => <tr key={row.rowNumber}><td><input type="checkbox" aria-label={'Select CSV row ' + row.rowNumber} disabled={row.errors.length > 0} checked={selectedPreviewIds.includes(row.testCaseId)} onChange={(event) => setSelectedPreviewIds((current) => event.target.checked ? [...current, row.testCaseId] : current.filter((id) => id !== row.testCaseId))} /></td><td>{row.rowNumber} · {row.testCaseId}</td><td>{row.name}</td><td>{row.priority}</td><td>{row.testDataKeys.join(', ') || '—'}</td><td>{row.stepCount}</td><td>{row.errors.length ? row.errors.join('; ') : 'Valid'}</td></tr>)}</tbody></table></div>

@@ -850,6 +850,7 @@ const server = createServer(async (request, response) => {
         recordingPolicy: ['disabled', 'mask-form-values', 'show-non-password-values', 'show-all-values'].includes(body.recordingPolicy) ? body.recordingPolicy : 'mask-form-values',
         reuseAuthenticatedSession: body.reuseAuthenticatedSession === true,
         allowWrites: body.allowWrites === true,
+        headless: typeof body.headless === 'boolean' ? body.headless : (process.env.HEADLESS === 'true'),
       }
       const requiresApproval = item.plan.actions.some((action) => action.requiresApproval === true)
       if (requiresApproval && body.approveInteractions !== true) return json(response, 403, { error: 'Explicit approval is required because this test contains interactive actions.' })
