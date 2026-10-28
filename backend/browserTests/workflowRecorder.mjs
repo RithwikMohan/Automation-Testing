@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { chromium } from 'playwright'
-import { createSecurityProxy, isManualLoginPostAllowed, normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
+import { createSecurityProxy, isManualLoginPostAllowed, isOracleHcmReadPostAllowed, normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
 import { getApplicationById, getApplicationWorkflowTemplate, saveApplicationWorkflowTemplate } from '../database.mjs'
 import { rememberApprovedBrowserSession } from './execution.mjs'
 import { detectWorkflowVariable } from '../workflows/variableDetection.mjs'
@@ -74,13 +74,13 @@ export function isCapturedFormWrite(session, method, targetUrl, contentType) {
   return Boolean(authorization && authorization.method === method && authorization.origin === targetUrl.origin && authorization.path === targetUrl.pathname)
 }
 
-function isCapturedOracleReadPostback(session, method, targetUrl) {
+function isCapturedOracleReadPostback(session, method, targetUrl, contentType) {
   if (!session.captureActive || session.manualAuthActive || session.application.auth_method !== 'manual' || method !== 'POST') return false
   let origin
   try { origin = normalizeAllowedOrigin(targetUrl.origin) } catch { return false }
   if (origin !== session.appOrigin) return false
-  if (['/fscmUI/BIProxy', '/fscmUI/faces/AtkHomePageWelcome'].includes(targetUrl.pathname)) return true
-  return /^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/workerJourneys\/action\/findOrAssignContextualJourney$/i.test(targetUrl.pathname)
+  if (targetUrl.pathname === '/fscmUI/faces/AtkHomePageWelcome') return true
+  return isOracleHcmReadPostAllowed({ method, targetUrl, contentType, applicationOrigin: session.appOrigin })
 }
 
 export function validateCaptureNavigationUrl(value) {
@@ -288,7 +288,7 @@ export async function startWorkflowCapture(application, options = {}) {
   const manualAuthOrigins = new Set([normalizeAllowedOrigin(new URL(loginUrl).origin)])
   const approvedResourceOrigins = new Set([normalizeAllowedOrigin(baseUrl.origin), ...(application.approved_resource_origins || []).map(normalizeAllowedOrigin)])
   const manualAuthPaths = new Set()
-  const session = { id, application, appOrigin: normalizeAllowedOrigin(baseUrl.origin), loginUrl, navOrigins, manualAuthOrigins, manualAuthPaths, manualAuthActive: application.auth_method === 'manual', captureActive: true, paused: false, reviewRequired: false, diagnostics: [], nextSequence: 1, lastInteractionAt: 0, lastActionIndex: -1, actions: [], fields: new Map(), expiresAt: Date.now() + captureTtlMs }
+  const session = { id, application, appOrigin: normalizeAllowedOrigin(baseUrl.origin), loginUrl, navOrigins, manualAuthOrigins, manualAuthPaths, credentialOrigin: null, manualAuthActive: application.auth_method === 'manual', captureActive: true, paused: false, reviewRequired: false, diagnostics: [], nextSequence: 1, lastInteractionAt: 0, lastActionIndex: -1, actions: [], fields: new Map(), expiresAt: Date.now() + captureTtlMs }
   session.proxy = await createSecurityProxy({
     allowedHost: baseUrl.hostname, primaryOrigin: baseUrl.origin,
     navigationOrigins: [...navOrigins].filter((origin) => origin !== normalizeAllowedOrigin(baseUrl.origin)),
@@ -332,7 +332,7 @@ export async function startWorkflowCapture(application, options = {}) {
     })
     // Match the visible headed browser window so fixed footers remain on-screen
     // even when desktop chrome and the taskbar reduce the available page height.
-    session.context = await session.browser.newContext({ ignoreHTTPSErrors: false, serviceWorkers: 'block', viewport: null })
+    session.context = await session.browser.newContext({ ignoreHTTPSErrors: false, viewport: null })
     session.page = await session.context.newPage()
     await session.context.exposeBinding('__chronosRecordAction', (_source, payload) => {
       if (!session.captureActive || session.actions.length >= 50) return
@@ -372,6 +372,9 @@ export async function startWorkflowCapture(application, options = {}) {
         const key = variable.key
         session.fields.set(key, { key, label: variable.label, type: variable.type, required: variable.required, variable: variable.variable, credential: variable.credential, sensitive: variable.sensitive })
         const action = { action: type, locator, locatorCandidates, dataKey: key, variableKey: key, ...(variable.credential ? { credentialInput: true } : {}), requiresApproval: true, ...captureMeta }
+        if (variable.credential) {
+          try { session.credentialOrigin = normalizeAllowedOrigin(new URL(pageUrl).origin) } catch {}
+        }
         const previous = session.actions.at(-1)
         if (previous?.action === type && JSON.stringify(previous.locator) === JSON.stringify(locator)) session.actions[session.actions.length - 1] = action
         else { session.lastActionIndex = session.actions.length; session.actions.push(action) }
@@ -416,9 +419,9 @@ export async function startWorkflowCapture(application, options = {}) {
       }
       const contentType = request.method() === 'POST' ? await request.headerValue('content-type').catch(() => null) : null
       const accessControlRequestMethod = request.method() === 'OPTIONS' ? await request.headerValue('access-control-request-method').catch(() => null) : null
-      const loginPost = isManualLoginPostAllowed({ method: request.method(), targetUrl: url, contentType, accessControlRequestMethod, manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin), manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive })
+      const loginPost = isManualLoginPostAllowed({ method: request.method(), targetUrl: url, contentType, accessControlRequestMethod, isDocumentNavigation: request.isNavigationRequest() && request.resourceType() === 'document', manualAuthOrigin: normalizeAllowedOrigin(new URL(loginUrl).origin), manualAuthOrigins, manualAuthPaths, isManualAuthActive: () => session.manualAuthActive })
       const captureWrite = isCapturedFormWrite(session, request.method(), url, contentType)
-      const oracleReadPostback = isCapturedOracleReadPostback(session, request.method(), url)
+      const oracleReadPostback = isCapturedOracleReadPostback(session, request.method(), url, contentType)
       if (!session.captureActive && !['GET', 'HEAD'].includes(request.method()) && !loginPost && !captureWrite && !oracleReadPostback) return blocked('request method is not allowed by the active manual-login or reviewed-form policy')
       if (captureWrite && !oracleReadPostback && session.lastActionIndex >= 0) {
         const action = session.actions[session.lastActionIndex]
@@ -544,6 +547,7 @@ function isManualLoginSubmitAction(session, action) {
   if (!hasPasswordFill) return false
   let origin
   try { origin = normalizeAllowedOrigin(new URL(action.pageUrl).origin) } catch { return false }
+  if (session.credentialOrigin && origin !== session.credentialOrigin) return false
   if (!session.manualAuthOrigins.has(origin)) return false
   const labels = [action.locator?.name, action.locator?.value, ...(action.locatorCandidates || []).map((item) => item.name || item.value)]
     .filter(Boolean).map((label) => String(label).trim().toLowerCase())

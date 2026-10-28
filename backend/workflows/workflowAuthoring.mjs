@@ -14,6 +14,7 @@ export function actionToRuleText(action) {
   if (action.action === 'assert_url') return `assert url ${action.operator} ${JSON.stringify(action.expected)}`
   const locator = locatorRule(action.locator)
   if (action.action === 'click' || action.action === 'check' || action.action === 'uncheck') return `${action.action} ${locator}`
+  if (['create', 'update', 'delete'].includes(action.action)) return `${action.action} ${locator}`
   if (action.action === 'fill' || action.action === 'select') return `${action.action} ${locator} <- \${test_data.${action.variableKey}}`
   if (action.action === 'wait_visible') return `wait visible ${locator} timeout=${action.timeoutMs}`
   if (action.action === 'assert_visible') return `assert visible ${locator}`

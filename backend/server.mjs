@@ -847,7 +847,7 @@ const server = createServer(async (request, response) => {
         defaultTimeoutMs,
         recordVideo: body.recordVideo !== false,
         captureScreenshotsOnFailure: body.captureScreenshotsOnFailure !== false,
-        recordingPolicy: body.recordingPolicy === 'disabled' ? 'disabled' : 'mask-form-values',
+        recordingPolicy: ['disabled', 'mask-form-values', 'show-non-password-values', 'show-all-values'].includes(body.recordingPolicy) ? body.recordingPolicy : 'mask-form-values',
         reuseAuthenticatedSession: body.reuseAuthenticatedSession === true,
         allowWrites: body.allowWrites === true,
       }

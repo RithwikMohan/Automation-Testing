@@ -6,7 +6,7 @@ import { validateActionPlan } from './actionRegistry.mjs'
 import { resolveWorkflowLocator } from '../workflows/locatorResolution.mjs'
 import { resolveContextualCell } from '../workflows/contextualTarget.mjs'
 import { chromium } from 'playwright'
-import { createSecurityProxy, isApprovedWritePostAllowed, isApprovedWorkflowPostbackAllowed, isManualLoginPostAllowed, normalizeAllowedOrigin } from '../exploration/networkSecurity.mjs'
+import { createSecurityProxy, isApprovedWritePostAllowed, isApprovedWorkflowPostbackAllowed, isManualLoginPostAllowed, isOracleHcmReadPostAllowed, normalizeAllowedOrigin, oracleHcmActionOperation } from '../exploration/networkSecurity.mjs'
 import {
   getBrowserTestCaseById,
   persistBrowserTestArtifact,
@@ -21,6 +21,7 @@ const cancellationControls = new Map()
 const approvedSessionStates = new Map()
 const MAX_EXECUTION_MS = 120_000
 const AUTH_STATE_TTL_MS = 15 * 60_000
+const CSV_FIELD_SETTLE_MS = 5000
 
 export function rememberApprovedBrowserSession(applicationId, state) {
   if (typeof applicationId !== 'string' || !state || !Array.isArray(state.cookies) || !Array.isArray(state.origins)) return false
@@ -109,6 +110,133 @@ async function uniqueActionLocator(page, action, timeoutMs = 0, testData = {}) {
   return uniqueLocator(page, action.locator)
 }
 
+async function clickOracleSelectOption(page, value, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  const normalizedValue = String(value).replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+  const escapedValue = String(value).trim().split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+  const optionName = new RegExp(`^\\s*${escapedValue}\\s*$`, 'i')
+  const rowOptionName = new RegExp(escapedValue, 'i')
+  while (Date.now() <= deadline) {
+    const matches = []
+    const frames = typeof page.frames === 'function' ? page.frames() : [page]
+    for (const frame of frames) {
+      try {
+        const candidates = [
+          { locator: frame.getByRole('option', { name: optionName }), exact: true },
+          { locator: frame.getByText(optionName), exact: true },
+          // Oracle JET lookup tables include other cells (for example, the
+          // legislation code) in the row's text, so match the requested name
+          // within the row rather than requiring the whole row to equal it.
+          { locator: frame.getByRole('row').filter({ hasText: rowOptionName }), exact: false },
+          // Oracle JET table popups often render a selectable row without ARIA
+          // option/row roles. Match the visible cell text, then click its row.
+          { locator: frame.getByText(String(value), { exact: true }), exact: true },
+        ]
+        for (const { locator: candidate, exact } of candidates) {
+          const count = await candidate.count()
+          const visible = []
+          for (let index = 0; index < count; index += 1) {
+            const match = candidate.nth(index)
+            if (!await match.isVisible()) continue
+            const text = await match.innerText().catch(() => '')
+            const normalizedText = String(text).replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+            if (exact ? normalizedText === normalizedValue : normalizedText.includes(normalizedValue)) visible.push(match)
+          }
+          if (visible.length === 1) {
+            const row = visible[0].locator('xpath=ancestor-or-self::*[self::tr or @role="row" or contains(@class,"oj-table")][1]')
+            if (await row.count() === 1 && await row.isVisible()) matches.push(row)
+            else matches.push(visible[0])
+            break
+          }
+          if (visible.length > 1 && candidate === candidates[0].locator) throw new BrowserTestError('AMBIGUOUS_LOCATOR', `More than one Oracle option matched "${value}".`)
+        }
+      } catch (error) {
+        if (!/frame was detached|execution context was destroyed|cannot find context/i.test(String(error?.message || error))) throw error
+      }
+    }
+    if (matches.length > 1) throw new BrowserTestError('AMBIGUOUS_LOCATOR', `More than one Oracle option matched "${value}".`)
+    if (matches.length === 1) {
+      try {
+        await matches[0].click({ timeout: Math.max(500, Math.min(timeoutMs, deadline - Date.now())) })
+      } catch (error) {
+        if (!/frame was detached|execution context was destroyed|cannot find context/i.test(String(error?.message || error))) throw error
+        // Oracle may rerender the ADF frame as the selected suggestion commits.
+        // The caller re-resolves the field and verifies the committed value.
+      }
+      return
+    }
+    await page.waitForTimeout(Math.min(100, Math.max(1, deadline - Date.now())))
+  }
+  throw new BrowserTestError('OPTION_NOT_FOUND', `Oracle did not show an exact suggestion named "${value}" after the CSV value was typed.`)
+}
+
+async function selectWorkflowOption(page, locator, value, timeoutMs) {
+  const tag = await locator.evaluate((element) => element.tagName.toLowerCase())
+  if (tag === 'select') {
+    try { return await locator.selectOption({ label: value }, { timeout: Math.min(timeoutMs, 3000) }) }
+    catch { return locator.selectOption(value, { timeout: timeoutMs }) }
+  }
+  const searchInput = tag === 'input' ? locator : locator.locator('input').first()
+  const inputCount = await searchInput.count().catch(() => 0)
+  const readOnly = inputCount ? await searchInput.getAttribute('readonly').catch(() => null) : null
+  const arrowSelector = '.oj-searchselect-arrow, .oj-searchselect-open-icon, .oj-select-arrow, [class*="searchselect-arrow"], [class*="select-arrow"]'
+  const isExpanded = async () => await searchInput.getAttribute('aria-expanded').catch(() => null) === 'true'
+    || await locator.getAttribute('aria-expanded').catch(() => null) === 'true'
+  const openDropdown = async () => {
+    if (await isExpanded()) return
+    let scope = locator
+    for (let level = 0; level < 4; level += 1) {
+      const arrows = scope.locator(arrowSelector)
+      const visibleArrows = []
+      for (let index = 0; index < await arrows.count().catch(() => 0); index += 1) {
+        const arrow = arrows.nth(index)
+        if (await arrow.isVisible().catch(() => false)) visibleArrows.push(arrow)
+      }
+      if (visibleArrows.length > 1) throw new BrowserTestError('AMBIGUOUS_LOCATOR', 'Oracle’s Legal Employer control has multiple visible dropdown arrows.')
+      if (visibleArrows.length === 1) {
+        await visibleArrows[0].click({ timeout: timeoutMs })
+        return
+      }
+      if (level <= 1) {
+        const buttons = scope.getByRole('button')
+        const visibleButtons = []
+        for (let index = 0; index < await buttons.count().catch(() => 0); index += 1) {
+          const button = buttons.nth(index)
+          if (await button.isVisible().catch(() => false)) visibleButtons.push(button)
+        }
+        if (visibleButtons.length > 1) throw new BrowserTestError('AMBIGUOUS_LOCATOR', 'Oracle’s Legal Employer control has multiple visible dropdown buttons.')
+        if (visibleButtons.length === 1) {
+          await visibleButtons[0].click({ timeout: timeoutMs })
+          return
+        }
+      }
+      if (level < 3) scope = scope.locator('xpath=..')
+    }
+    const bounds = await locator.boundingBox().catch(() => null)
+    if (!bounds || bounds.width <= 24 || bounds.height <= 10) throw new BrowserTestError('LOCATOR_NOT_FOUND', 'Oracle’s Legal Employer dropdown trigger was not found.')
+    await locator.click({ position: { x: bounds.width - Math.min(12, bounds.width / 4), y: bounds.height / 2 }, timeout: timeoutMs })
+  }
+
+  await openDropdown()
+  await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+  try {
+    await clickOracleSelectOption(page, value, Math.min(timeoutMs, 1500))
+    return
+  } catch (error) {
+    if (error.code === 'AMBIGUOUS_LOCATOR') throw error
+  }
+  if (inputCount && readOnly === null) await searchInput.fill(value, { timeout: Math.min(timeoutMs, 3000) }).catch(() => {})
+  await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+  await openDropdown()
+  await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+  try {
+    return await clickOracleSelectOption(page, value, timeoutMs)
+  } catch (error) {
+    if (error.code !== 'OPTION_NOT_FOUND') throw error
+    throw new BrowserTestError('OPTION_NOT_FOUND', 'Oracle did not show an exact matching Legal Employer or Business Unit option after the dropdown was opened.')
+  }
+}
+
 function locatorDescription(spec) {
   return spec.kind + (spec.name ? ':' + spec.name : spec.value ? ':' + spec.value : '')
 }
@@ -121,10 +249,66 @@ function safePageUrl(page) {
   } catch { return '' }
 }
 
+function isOracleHcmApplication(app) {
+  return /\boracle\b.*\bhcm\b/i.test(String(app?.application_name || ''))
+}
+
+function isOracleEmployeeWizardPage(app, pageUrl) {
+  if (!isOracleHcmApplication(app)) return false
+  try {
+    const pathname = new URL(pageUrl).pathname
+    return /\/employment-addperson\/create\/employee\/?$/i.test(pathname)
+      || /\/hcmUI\/faces\/FndOverview\/?$/i.test(pathname)
+  } catch { return false }
+}
+
+function fieldLocatorTimeout(page, app, defaultTimeoutMs) {
+  if (!isOracleHcmApplication(app)) return defaultTimeoutMs
+  return isOracleEmployeeWizardPage(app, page.url())
+    ? Math.max(defaultTimeoutMs, 30_000)
+    : defaultTimeoutMs
+}
+
+async function blurFilledField(locator, timeoutMs) {
+  // Use a real keyboard blur first so Oracle receives the same focus/change
+  // events as a person tabbing out of a field. ADF can detach and rebuild the
+  // input during that event, so fall back to the element's blur when possible.
+  try { await locator.press('Tab', { timeout: Math.min(timeoutMs, 5000) }) } catch {
+    await locator.evaluate((element) => element.blur()).catch(() => {})
+  }
+  await locator.evaluate((element) => element.blur()).catch(() => {})
+}
+
+async function waitForOracleEmployeeFormReady(page, nextAction, timeoutMs, testData) {
+  const deadline = Date.now() + Math.min(45_000, Math.max(timeoutMs, 15_000))
+  const heading = page.getByText('Hire an Employee: Identification', { exact: true }).first()
+  const taskMenu = page.getByText('What do you want to do or manage?', { exact: true }).first()
+  while (Date.now() < deadline) {
+    const headingVisible = await heading.isVisible().catch(() => false)
+    let fieldVisible = false
+    if (nextAction && ['fill', 'select'].includes(nextAction.action)) {
+      try {
+        const field = await uniqueActionLocator(page, nextAction, Math.min(timeoutMs, 1000), testData)
+        fieldVisible = await field.isVisible().catch(() => false)
+      } catch {}
+    }
+    const taskMenuVisible = await taskMenu.isVisible().catch(() => false)
+    if ((headingVisible || fieldVisible) && !taskMenuVisible) return
+    await page.waitForTimeout(150)
+  }
+  throw new BrowserTestError('ORACLE_PAGE_LOAD_TIMEOUT', 'Oracle did not finish opening the Hire an Employee form before field entry.', 'FAILED')
+}
+
 function safeDiagnosticUrl(raw) {
   try {
     const url = new URL(raw)
-    const path = url.pathname.replace(/\/(?:eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{24,})(?=\/|$)/g, '/[redacted]')
+    const path = url.pathname.split('/').map((segment) => {
+      if (/^(?:eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|[A-Fa-f0-9]{32,}|[0-9a-f]{8}-[0-9a-f-]{27})$/i.test(segment)) return '[redacted]'
+      // Keep readable camel-case REST resource/action names in diagnostics,
+      // while continuing to hide long opaque IDs and token-like path segments.
+      if (segment.length >= 24 && !/^[a-z]+(?:[A-Z][A-Za-z0-9]*)+$/.test(segment)) return '[redacted]'
+      return segment
+    }).join('/')
     return { origin: url.origin, path }
   } catch { return { origin: null, path: null } }
 }
@@ -199,9 +383,12 @@ export async function executeBrowserTest(executionId, options = {}) {
   const startedMs = Date.now()
   const runId = executionId.id
   const actionTimeoutMs = Math.min(60_000, Math.max(1_000, Number(options.defaultTimeoutMs) || 10_000))
-  const navigationTimeoutMs = actionTimeoutMs
+  // Federated Oracle sign-in can follow several same-workflow redirects and
+  // return HTTP 200 before DOMContentLoaded fires. Give navigations their own
+  // bounded allowance without lengthening ordinary locator/action waits.
+  const navigationTimeoutMs = Math.min(60_000, Math.max(actionTimeoutMs, 30_000))
   const recordVideoRequested = options.recordVideo !== false && options.recordArtifacts !== false
-  const recordingPolicy = options.recordingPolicy === 'disabled' ? 'disabled' : 'mask-form-values'
+  const recordingPolicy = ['disabled', 'mask-form-values', 'show-non-password-values', 'show-all-values'].includes(options.recordingPolicy) ? options.recordingPolicy : 'mask-form-values'
   const reuseAuthenticatedSession = options.reuseAuthenticatedSession === true
   const control = options.control || { cancelled: false, page: null }
   cancellationControls.set(runId, control)
@@ -219,6 +406,7 @@ export async function executeBrowserTest(executionId, options = {}) {
   const manualAuthOrigins = new Set()
   let activeWriteAuthorization = null
   let activeWorkflowPostback = null
+  let pendingWorkflowPostback = null
   let policyBlock = null
   let stepNumber = 0
   let videoPath
@@ -232,7 +420,16 @@ export async function executeBrowserTest(executionId, options = {}) {
   let testData = {}
   const policyWarnings = []
   const diagnostics = []
-  const recordDiagnostic = (item) => { if (diagnostics.length < 100) diagnostics.push(item) }
+  const recordDiagnostic = (item) => {
+    if (diagnostics.length < 100) { diagnostics.push(item); return }
+    // Pages such as Oracle HCM can emit many client-side rule errors during
+    // startup. Keep actionable network-policy failures in the report even when
+    // those messages have filled the diagnostic limit.
+    if (['request_blocked', 'outbound_request_blocked', 'request_failed'].includes(item?.type)) {
+      const replaceIndex = diagnostics.findIndex((entry) => entry?.type === 'console_error')
+      if (replaceIndex >= 0) diagnostics[replaceIndex] = item
+    }
+  }
   let remoteHttpError = null
   const recordPolicyWarning = (code, hostname, category, topLevelNavigation) => {
     policyWarnings.push({ reasonCode: code, hostname: hostname || null, category, topLevelNavigation: Boolean(topLevelNavigation) })
@@ -263,8 +460,13 @@ export async function executeBrowserTest(executionId, options = {}) {
     const appUrl = new URL(app.application_base_url)
     const loginUrl = app.application_login_url || app.application_base_url
     const loginOrigin = normalizeAllowedOrigin(new URL(loginUrl).origin)
-    manualAuthOrigins.add(loginOrigin)
     const navOrigins = new Set([normalizeAllowedOrigin(appUrl.origin), ...(app.approved_navigation_origins || []).map(normalizeAllowedOrigin)])
+    // The registered login URL can redirect through an explicitly approved
+    // identity provider before the runner sees its first page event. Seed the
+    // temporary auth scope from registered navigation origins so that redirect
+    // POSTs to that IdP are allowed while manual authentication is active.
+    for (const origin of navOrigins) manualAuthOrigins.add(origin)
+    manualAuthOrigins.add(loginOrigin)
     if (!navOrigins.has(loginOrigin)) throw new BrowserTestError('LOGIN_ORIGIN_BLOCKED', 'The registered login URL origin is not an approved navigation origin.', 'BLOCKED')
     const resourceOrigins = new Set([normalizeAllowedOrigin(appUrl.origin), ...(app.approved_resource_origins || []).map(normalizeAllowedOrigin)])
     const internalOrigins = [appUrl.origin, ...(app.approved_navigation_origins || []), ...(app.approved_resource_origins || [])]
@@ -288,6 +490,9 @@ export async function executeBrowserTest(executionId, options = {}) {
       isManualAuthActive: () => manualAuthActive,
       isApprovedWriteRequest: (request) => isApprovedWritePostAllowed({ ...request, authorization: activeWriteAuthorization }),
       isApprovedWorkflowPostback: (request) => isApprovedWorkflowPostbackAllowed({ ...request, authorization: activeWorkflowPostback }),
+      // The outbound proxy independently inspects the JSON operation body before
+      // permitting Oracle's employment-configuration helper action.
+      isOracleHcmReadPost: (request) => isOracleHcmApplication(app) && isOracleHcmReadPostAllowed({ ...request, applicationOrigin: appUrl.origin }),
       dnsLookup: options.dnsLookup,
       testTargetIp: options.testTargetIp,
       testTargetPort: options.testTargetPort,
@@ -303,15 +508,27 @@ export async function executeBrowserTest(executionId, options = {}) {
     const cachedAuth = reuseAuthenticatedSession && !planHasCsvCredentials ? approvedSessionStates.get(String(app.application_id)) : null
     const cachedStorageState = cachedAuth && cachedAuth.expiresAt > Date.now() ? cachedAuth.state : undefined
     if (cachedAuth && !cachedStorageState) approvedSessionStates.delete(String(app.application_id))
-    browser = await chromium.launch({
+    const launchOptions = {
       headless: typeof options.headless === 'boolean' ? options.headless : app.application_auth_method === 'manual' && !cachedStorageState ? false : process.env.HEADLESS !== 'false',
       timeout: 20_000,
       proxy: { server: proxy.proxyUrl, bypass: '<-loopback>' },
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
-    })
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
+    }
+    // Match the manual recorder's browser engine on Windows; Oracle's responsive
+    // Redwood controls can render differently in bundled Chromium.
+    if (process.platform === 'win32') {
+      try { browser = await chromium.launch({ ...launchOptions, channel: 'chrome' }) }
+      catch (error) {
+        if (!/chrome.*(?:not found|not installed)|executable doesn't exist/i.test(String(error?.message || error))) throw error
+        browser = await chromium.launch(launchOptions)
+      }
+    } else browser = await chromium.launch(launchOptions)
     context = await browser.newContext({
       ignoreHTTPSErrors: false,
-      serviceWorkers: 'block',
+      // Keep Oracle's responsive layout aligned with the manual workflow
+      // recorder so fixed-footer controls remain present in the live browser.
+      // Oracle's Redwood shell also expects its service worker to be available.
+      viewport: null,
       ...(cachedStorageState ? { storageState: cachedStorageState } : {}),
       ...(safeRecording ? { recordVideo: { dir: outputDirectory } } : {}),
     })
@@ -333,6 +550,16 @@ export async function executeBrowserTest(executionId, options = {}) {
         }
         installMask()
         new MutationObserver(installMask).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] })
+      })
+    }
+    if (safeRecording && recordingPolicy === 'show-all-values') {
+      await context.addInitScript(() => {
+        const style = document.createElement('style')
+        style.id = 'chronos-show-all-form-values'
+        style.textContent = 'input[type="password"] { -webkit-text-security: none !important; }'
+        const install = () => { if (document.documentElement && !document.getElementById(style.id)) document.documentElement.appendChild(style) }
+        install()
+        new MutationObserver(install).observe(document, { childList: true, subtree: true })
       })
     }
     page = await context.newPage()
@@ -373,22 +600,38 @@ export async function executeBrowserTest(executionId, options = {}) {
         try { manualAuthOrigins.add(normalizeAllowedOrigin(parsed.origin)) } catch {}
       }
       const contentType = method === 'POST' ? await request.headerValue('content-type').catch(() => null) : null
+      let oracleActionPayload = null
+      let oracleActionPayloadParsed = false
+      if (isOracleHcmApplication(app) && /^application\/vnd\.oracle\.adf\.action\+json(?:;|$)/i.test(String(contentType || ''))) {
+        try { oracleActionPayload = request.postDataJSON(); oracleActionPayloadParsed = true } catch {}
+      }
       const accessControlRequestMethod = method === 'OPTIONS' ? await request.headerValue('access-control-request-method').catch(() => null) : null
       const isManualLoginPost = isManualLoginPostAllowed({
         method,
         targetUrl: parsed,
         contentType,
         accessControlRequestMethod,
+        isDocumentNavigation: request.isNavigationRequest() && request.resourceType() === 'document',
         manualAuthOrigin: loginOrigin,
         manualAuthOrigins,
         manualAuthPaths,
         isManualAuthActive: () => manualAuthActive,
       })
       const isApprovedWritePost = isApprovedWritePostAllowed({ method, targetUrl: parsed, contentType, authorization: activeWriteAuthorization })
-      const isApprovedPostback = request.isNavigationRequest() && request.resourceType() === 'document' && isApprovedWorkflowPostbackAllowed({ method, targetUrl: parsed, contentType, authorization: activeWorkflowPostback })
-      if (method !== 'GET' && method !== 'HEAD' && !isManualLoginPost && !isApprovedWritePost && !isApprovedPostback) {
+      // Oracle ADF actions can submit their reviewed form postback through XHR
+      // instead of a document navigation. The approval remains active only for
+      // the captured click and is still limited to its exact origin and path.
+      const isApprovedPostback = isApprovedWorkflowPostbackAllowed({ method, targetUrl: parsed, contentType, authorization: activeWorkflowPostback })
+      // Oracle's BI proxy is used as a same-origin page-data document request
+      // while rendering the ADF shell. Without this read-only query the browser
+      // shows the navbar but the main content area becomes a broken document.
+      const isOracleHcmReadPost = isOracleHcmApplication(app)
+        && isOracleHcmReadPostAllowed({ method, targetUrl: parsed, contentType, applicationOrigin: appUrl.origin, requestBody: oracleActionPayload })
+      if (method !== 'GET' && method !== 'HEAD' && !isManualLoginPost && !isApprovedWritePost && !isApprovedPostback && !isOracleHcmReadPost) {
         recordPolicyWarning('READ_ONLY_METHOD_BLOCKED', parsed.hostname, request.resourceType(), isMainNavigation)
-        recordDiagnostic({ type: 'request_blocked', stage: isMainNavigation ? 'main_document' : 'subresource', blockingComponent: 'Chronos read-only request policy', reasonCode: 'READ_ONLY_METHOD_BLOCKED', method, ...safeDiagnosticUrl(request.url()), resourceType: request.resourceType(), isMainFrameNavigation: isMainNavigation, reason: 'Chronos blocked this non-GET/HEAD request under the read-only policy.' })
+        const manualAuthOriginObserved = (() => { try { return manualAuthOrigins.has(normalizeAllowedOrigin(parsed.origin)) } catch { return false } })()
+        const oracleOperation = oracleHcmActionOperation(oracleActionPayload)
+        recordDiagnostic({ type: 'request_blocked', stage: isMainNavigation ? 'main_document' : 'subresource', blockingComponent: 'Chronos read-only request policy', reasonCode: 'READ_ONLY_METHOD_BLOCKED', method, ...safeDiagnosticUrl(request.url()), resourceType: request.resourceType(), isMainFrameNavigation: isMainNavigation, ...(method === 'POST' ? { manualAuthActive, manualAuthOriginObserved, requestContentType: String(contentType || '').split(';')[0] || null, ...(isOracleHcmApplication(app) ? { oracleActionPayloadParsed, oracleActionOperation: oracleOperation || null } : {}) } : {}), reason: 'Chronos blocked this non-GET/HEAD request under the read-only policy.' })
         return route.abort('blockedbyclient')
       }
       return route.continue()
@@ -396,6 +639,13 @@ export async function executeBrowserTest(executionId, options = {}) {
     page.on('response', (response) => {
       const request = response.request()
       const mainNavigation = isMainFrameNavigation(request, page)
+      // Redirects in federated sign-in can bypass the request route callback for
+      // an intermediate identity-provider URL. Learn its origin from the
+      // completed top-level GET so the following login form POST can be scoped
+      // to an origin the browser actually visited during the active auth gate.
+      if (manualAuthActive && ['GET', 'HEAD'].includes(request.method()) && mainNavigation) {
+        try { manualAuthOrigins.add(normalizeAllowedOrigin(new URL(response.url()).origin)) } catch {}
+      }
       if (traceStarted && response.headers()['set-cookie']) traceSensitive = true
       const responseUrl = safeDiagnosticUrl(response.url())
       const proxyRejected = diagnostics.some((item) => item.type === 'outbound_request_blocked' && item.hostname === responseUrl.origin?.replace(/^https?:\/\//, '').toLowerCase().replace(/:\d+$/, ''))
@@ -493,9 +743,11 @@ export async function executeBrowserTest(executionId, options = {}) {
       traceStarted = true
     }
 
-    for (const action of plan.actions) {
+    for (let actionIndex = 0; actionIndex < plan.actions.length; actionIndex += 1) {
+      const action = plan.actions[actionIndex]
       throwIfCancelled()
       if (Date.now() - startedMs > MAX_EXECUTION_MS) throw new BrowserTestError('EXECUTION_TIMEOUT', 'The browser test exceeded its two-minute execution limit.')
+      if (pendingWorkflowPostback && !(action.action === 'fill' && action.dataKey === 'search')) pendingWorkflowPostback = null
       stepNumber += 1
       const stepStarted = new Date()
       const stepStartedMs = Date.now()
@@ -505,12 +757,66 @@ export async function executeBrowserTest(executionId, options = {}) {
         if (action.action === 'navigate') {
           const target = new URL(action.url)
           if (!['http:', 'https:'].includes(target.protocol)) throw new BrowserTestError('NAVIGATION_ORIGIN_BLOCKED', 'Navigation must use HTTP or HTTPS.', 'BLOCKED')
+          // General pages such as Oracle's sign-in page can keep late resources
+          // open after their document is interactive. Wait for the document to
+          // be ready here; the employee wizard below has its own UI readiness
+          // checks before execution advances.
           await page.goto(action.url, { waitUntil: 'domcontentloaded', timeout: navigationTimeoutMs })
+          const oracleEmployeeWizard = isOracleHcmApplication(app) && /\/employment-addperson\/create\/employee\/?$/.test(target.pathname)
+          if (oracleEmployeeWizard) {
+            // Oracle Redwood finishes rendering after the document load event.
+            // Don't advance the workflow while its employee wizard is still
+            // an empty shell; wait for visible page content and the footer CTA.
+            const pageReadyTimeoutMs = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            const expectedPage = Promise.all([
+              page.getByText('Hire an Employee', { exact: true }).first().waitFor({ state: 'visible', timeout: pageReadyTimeoutMs }),
+              page.getByText('Info to include', { exact: true }).first().waitFor({ state: 'visible', timeout: pageReadyTimeoutMs }),
+              page.getByRole('button', { name: 'Continue', exact: true }).first().waitFor({ state: 'visible', timeout: pageReadyTimeoutMs }),
+            ]).then(() => 'ready').catch(() => 'timeout')
+            const restActionError = page.getByText('Exception during RestAction', { exact: true }).first()
+              .waitFor({ state: 'visible', timeout: pageReadyTimeoutMs }).then(() => 'rest-action-error').catch(() => 'timeout')
+            const pageState = await Promise.race([expectedPage, restActionError])
+            if (pageState === 'rest-action-error') throw new BrowserTestError('ORACLE_REST_ACTION_FAILED', 'Oracle displayed “Exception during RestAction” while loading the employee wizard. A required HCM REST action did not complete.', 'FAILED')
+            if (pageState !== 'ready') throw new BrowserTestError('ORACLE_PAGE_LOAD_TIMEOUT', 'The employee wizard did not finish rendering: its heading, first section, or Continue button did not become visible.', 'FAILED')
+          }
           if (remoteHttpError) throw new BrowserTestError('REMOTE_HTTP_ERROR', 'The registered application returned HTTP ' + remoteHttpError.status + '.', 'FAILED')
           actual = { url: safePageUrl(page) }
           expected = { url: action.url }
         } else if (action.action === 'click') {
           const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
+          const isOracleEmployeeNext = isOracleEmployeeWizardPage(app, page.url())
+            && action.locator?.kind === 'role'
+            && action.locator.role === 'button'
+            && /^Next$/i.test(action.locator.name || '')
+          if (isOracleEmployeeNext) {
+            const legalEmployerAction = plan.actions.find((candidate) => candidate.action === 'fill' && candidate.dataKey === 'legal_employer')
+            const legalEmployerValue = String(testCase.test_data.legal_employer ?? '').trim()
+            if (legalEmployerAction && legalEmployerValue) {
+              const legalEmployerLocator = await uniqueActionLocator(page, legalEmployerAction, actionTimeoutMs, testCase.test_data)
+              const retainedValue = await legalEmployerLocator.inputValue({ timeout: actionTimeoutMs }).catch(() => '')
+              if (retainedValue.trim() !== legalEmployerValue) {
+                throw new BrowserTestError(
+                  'ORACLE_FIELD_VALUE_CLEARED',
+                  'Oracle cleared the Legal Employer value before Next. The workflow stopped without clicking Next; this required field will not accept typed text until an Oracle suggestion is committed.'
+                )
+              }
+            }
+          }
+          const isOracleSubmit = isOracleHcmApplication(app)
+            && action.locator?.kind === 'role'
+            && action.locator.role === 'button'
+            && action.locator.name === 'Submit'
+            && /\/employment-addperson\/create\/employee\/?$/i.test(new URL(page.url()).pathname)
+          if (isOracleSubmit) {
+            const submitReadyDeadline = Date.now() + Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            while (!(await locator.isEnabled().catch(() => false)) && Date.now() < submitReadyDeadline) {
+              throwIfCancelled()
+              await new Promise((resolve) => setTimeout(resolve, 250))
+            }
+            if (!(await locator.isEnabled().catch(() => false))) {
+              throw new BrowserTestError('ORACLE_SUBMIT_DISABLED', 'Oracle reached the final employee wizard step, but Submit is still disabled. Complete any required Assignment fields or resolve the page validation before submitting.', 'FAILED')
+            }
+          }
           if (action.postbackAuthorization) {
             const auth = action.postbackAuthorization
             if (!navOrigins.has(normalizeAllowedOrigin(auth.origin))) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The captured form postback origin is outside the selected registered application navigation scope.', 'BLOCKED')
@@ -520,10 +826,77 @@ export async function executeBrowserTest(executionId, options = {}) {
               try { const target = new URL(owner.action, location.href); return { origin: target.origin, path: target.pathname } } catch { return null }
             })
             if (!form || form.origin !== auth.origin || form.path !== auth.path) throw new BrowserTestError('WRITE_SCOPE_INVALID', 'The captured form postback no longer matches its reviewed origin and path.', 'BLOCKED')
+            const postbackTimeoutMs = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            const postbackResponseWait = page.waitForResponse((response) => {
+              const request = response.request()
+              try {
+                const target = new URL(response.url())
+                return request.method() === 'POST' && target.origin === auth.origin && target.pathname === auth.path
+              } catch { return false }
+            }, { timeout: postbackTimeoutMs }).catch(() => null)
             activeWorkflowPostback = auth
-            try { await locator.click({ timeout: actionTimeoutMs }) } finally { activeWorkflowPostback = null }
+            try {
+              await locator.click({ timeout: actionTimeoutMs })
+              const postbackResponse = await postbackResponseWait
+              if (!postbackResponse) throw new BrowserTestError('WORKFLOW_POSTBACK_UNCONFIRMED', 'Oracle did not complete the reviewed form postback after the click. No retry was attempted.', 'FAILED')
+              if (postbackResponse.status() >= 400) throw new BrowserTestError('WORKFLOW_POSTBACK_REJECTED', 'Oracle returned HTTP ' + postbackResponse.status() + ' for the reviewed form postback.', 'FAILED')
+              pendingWorkflowPostback = auth
+            } finally { activeWorkflowPostback = null }
           } else {
-            await locator.click({ timeout: actionTimeoutMs })
+            try {
+              await locator.click({ timeout: actionTimeoutMs })
+            } catch (error) {
+              // Oracle's Navigator tree can render a transparent overlay over
+              // its tiny group-expander links. If the pointer click is blocked,
+              // activate that specific menu link from the keyboard instead.
+              const isOracleGroupExpander = isOracleHcmApplication(app)
+                && action.locator?.kind === 'role'
+                && action.locator.role === 'link'
+                && /^Expand (?:My Client Groups|Me)$/i.test(action.locator.name || '')
+                && /\/fscmUI\/faces\/AtkHomePageWelcome\/?$/i.test(new URL(page.url()).pathname)
+              if (!isOracleGroupExpander || !/Timeout|intercepts pointer events|detached from the DOM/i.test(String(error?.message || error))) throw error
+              await locator.focus({ timeout: actionTimeoutMs })
+              await locator.press('Enter', { timeout: actionTimeoutMs })
+            }
+          }
+          const nextAction = plan.actions[actionIndex + 1]
+          const isOracleHireEmployeeClick = isOracleHcmApplication(app)
+            && action.locator?.kind === 'role'
+            && action.locator.role === 'button'
+            && /^Hire an Employee$/i.test(action.locator.name || '')
+          if (isOracleHireEmployeeClick) {
+            await waitForOracleEmployeeFormReady(page, nextAction, actionTimeoutMs, testCase.test_data)
+          }
+          const isOracleWizardContinue = isOracleEmployeeWizardPage(app, page.url())
+            && action.locator?.kind === 'role'
+            && action.locator.role === 'button'
+            && action.locator.name === 'Continue'
+            && /\/employment-addperson\/create\/employee\/?$/i.test(new URL(page.url()).pathname)
+          if (isOracleWizardContinue && nextAction && ['fill', 'select'].includes(nextAction.action)) {
+            // Redwood changes wizard sections asynchronously after Continue.
+            // Wait for the next captured field itself, not just the button
+            // click or document load, before advancing the workflow.
+            const nextFieldTimeoutMs = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            try {
+              await uniqueActionLocator(page, nextAction, nextFieldTimeoutMs, testCase.test_data)
+            } catch (error) {
+              if (error.code === 'LOCATOR_NOT_FOUND') throw new BrowserTestError('ORACLE_PAGE_LOAD_TIMEOUT', 'Oracle advanced the wizard after Continue, but the next field did not finish loading.', 'FAILED')
+              throw error
+            }
+          } else if (isOracleWizardContinue && nextAction?.action === 'click'
+            && nextAction.locator?.kind === 'role'
+            && nextAction.locator.role === 'button'
+            && nextAction.locator.name === 'Submit') {
+            // The last Continue transitions from Personal details to Assignment.
+            // A successful click only confirms the footer received the click;
+            // Redwood can still be rendering the next wizard section.
+            const nextPageTimeoutMs = Math.min(45_000, Math.max(actionTimeoutMs, 30_000))
+            try {
+              await page.getByRole('heading', { name: 'Assignment', exact: true })
+                .waitFor({ state: 'visible', timeout: nextPageTimeoutMs })
+            } catch {
+              throw new BrowserTestError('ORACLE_PAGE_LOAD_TIMEOUT', 'Oracle accepted Continue, but the Assignment page did not finish loading.', 'FAILED')
+            }
           }
           if (action.manualLoginSubmit === true) {
             await page.locator('input[type="password"]:visible').waitFor({ state: 'hidden', timeout: actionTimeoutMs }).catch(() => {})
@@ -567,8 +940,44 @@ export async function executeBrowserTest(executionId, options = {}) {
           const value = String(testCase.test_data[action.dataKey] ?? '')
           if (!value) actual = 'Optional field is blank; fill action skipped.'
           else {
-            const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
-            await locator.fill(value, { timeout: actionTimeoutMs })
+            const locatorTimeoutMs = fieldLocatorTimeout(page, app, actionTimeoutMs)
+            const locator = await uniqueActionLocator(page, action, locatorTimeoutMs, testCase.test_data)
+            let searchPostback = null
+            if (action.dataKey === 'search' && pendingWorkflowPostback) {
+              try {
+                const current = new URL(page.url())
+                if (normalizeAllowedOrigin(current.origin) === pendingWorkflowPostback.origin && current.pathname === pendingWorkflowPostback.path) searchPostback = pendingWorkflowPostback
+              } catch {}
+            }
+            if (searchPostback) activeWorkflowPostback = searchPostback
+            try {
+              const isOracleEmployeeLegalEmployer = isOracleEmployeeWizardPage(app, page.url()) && action.dataKey === 'legal_employer'
+              try {
+                await locator.fill(value, { timeout: locatorTimeoutMs })
+              } catch (fillError) {
+                // Match the successful runner's keyboard fallback for custom
+                // Oracle inputs, without activating the dropdown arrow.
+                if (!isOracleEmployeeLegalEmployer || typeof locator.pressSequentially !== 'function') throw fillError
+                await locator.fill('', { timeout: locatorTimeoutMs })
+                await locator.click({ timeout: locatorTimeoutMs })
+                await locator.pressSequentially(value, { timeout: locatorTimeoutMs })
+              }
+              await blurFilledField(locator, locatorTimeoutMs)
+              await page.waitForTimeout(CSV_FIELD_SETTLE_MS)
+              if (isOracleEmployeeLegalEmployer) {
+                const refreshedLocator = await uniqueActionLocator(page, action, locatorTimeoutMs, testCase.test_data)
+                const retainedValue = await refreshedLocator.inputValue({ timeout: locatorTimeoutMs }).catch(() => '')
+                if (retainedValue.trim() !== value.trim()) {
+                  throw new BrowserTestError(
+                    'ORACLE_FIELD_VALUE_CLEARED',
+                    'Oracle cleared the Legal Employer value after it was typed. The workflow stopped before continuing.'
+                  )
+                }
+              }
+              if (searchPostback) await page.waitForTimeout(250)
+            } finally {
+              if (searchPostback) activeWorkflowPostback = null
+            }
             actual = 'Field filled; submitted data is not recorded.'
             expected = { locator: locatorDescription(action.locator), value: '[test data reference]' }
           }
@@ -576,9 +985,13 @@ export async function executeBrowserTest(executionId, options = {}) {
           const value = action.optionLabel !== undefined ? String(action.optionLabel) : String(testCase.test_data[action.dataKey] ?? '')
           if (!value) actual = 'Optional field is blank; select action skipped.'
           else {
-            const locator = await uniqueActionLocator(page, action, actionTimeoutMs, testCase.test_data)
-            if (action.optionLabel) await locator.selectOption({ label: action.optionLabel }, { timeout: actionTimeoutMs })
-            else await locator.selectOption(value, { timeout: actionTimeoutMs })
+            const locatorTimeoutMs = fieldLocatorTimeout(page, app, actionTimeoutMs)
+            const locator = await uniqueActionLocator(page, action, locatorTimeoutMs, testCase.test_data)
+            if (action.optionLabel) {
+              const tag = await locator.evaluate((element) => element.tagName.toLowerCase())
+              if (tag === 'select') await locator.selectOption({ label: action.optionLabel }, { timeout: locatorTimeoutMs })
+              else await selectWorkflowOption(page, locator, String(action.optionLabel), locatorTimeoutMs)
+            } else await selectWorkflowOption(page, locator, value, locatorTimeoutMs)
             actual = 'Option selected; submitted data is not recorded.'
             expected = { locator: locatorDescription(action.locator), value: '[test data reference]' }
           }
@@ -651,7 +1064,7 @@ export async function executeBrowserTest(executionId, options = {}) {
         await persistBrowserTestStepResult(result).catch(() => {})
         stepResults.push(result)
         if (options.captureScreenshotsOnFailure !== false && options.recordArtifacts !== false && page && app.application_auth_method !== 'manual') {
-          await maskInputsForScreenshot(page)
+          if (recordingPolicy !== 'show-all-values') await maskInputsForScreenshot(page)
           const screenshot = await page.screenshot({ fullPage: false }).catch(() => null)
           if (screenshot) await saveArtifact({ executionId: runId, kind: 'screenshot', bytes: screenshot, contentType: 'image/png', outputDirectory, artifactBase }).catch(() => {})
         }

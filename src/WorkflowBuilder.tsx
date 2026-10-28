@@ -6,7 +6,7 @@ const LOCATORS = ['role', 'label', 'id', 'name', 'placeholder', 'css', 'xpath', 
 type LocatorKind = typeof LOCATORS[number]
 type Locator = { kind: LocatorKind; value?: string; role?: string; name?: string }
 type ContextTarget = { strategy: 'table_intersection'; tableSelector: string; rowSelector: string; rowLabelSelector: string; headerSelector: string; rowCellSelector?: string; cellSelector: string; rowText: string; headerText: string; headerMatch: 'exact' | 'date' }
-type WorkflowAction = { id: string; action: typeof ACTIONS[number]; name?: string; url?: string; locator?: Locator; locatorCandidates?: Locator[]; variableKey?: string; timeoutMs?: number; expected?: string; operator?: 'equals' | 'contains'; contextualTarget?: ContextTarget }
+type WorkflowAction = { id: string; action: typeof ACTIONS[number] | 'create' | 'update' | 'delete'; name?: string; url?: string; locator?: Locator; locatorCandidates?: Locator[]; variableKey?: string; timeoutMs?: number; expected?: string; operator?: 'equals' | 'contains'; contextualTarget?: ContextTarget }
 type WorkflowVariable = { key: string; label: string; type?: 'text' | 'number' | 'date' | 'email'; required?: boolean; defaultValue?: string; pattern?: string; variable?: boolean; sensitive?: boolean; credential?: boolean }
 type Workflow = { applicationId: string; name: string; actions: WorkflowAction[]; variables: WorkflowVariable[]; version?: number }
 type Application = { id: string; name: string; base_url: string }
@@ -46,18 +46,23 @@ function buildCsvTemplate(workflow: Workflow, version: number) {
   const variables = workflow.variables.filter((variable) => variable.variable !== false && (variable.sensitive !== true || variable.credential === true))
   const headers = ['test_case_id', 'name', 'preconditions', 'steps', ...variables.map((variable) => variable.key), 'expected_result', 'priority', 'tags']
   const locatorRule = (locator?: Locator) => !locator ? '' : locator.kind === 'role' ? `role=${locator.role}[name=${JSON.stringify(locator.name)}]` : locator.kind === 'css' ? `css=${locator.value}` : `${locator.kind}=${JSON.stringify(locator.value)}`
-  const steps = workflow.actions.map((action) => {
+  const ruleForAction = (action: WorkflowAction) => {
     if (action.action === 'navigate') return `navigate: ${action.url || ''}`
     if (action.action === 'assert_url') return `assert url ${action.operator || 'contains'} ${JSON.stringify(action.expected || '')}`
     const locator = locatorRule(action.locator)
     if (['click', 'check', 'uncheck'].includes(action.action)) return `${action.action} ${locator}`
+    if (['create', 'update', 'delete'].includes(action.action)) return `${action.action} ${locator}`
     if (['fill', 'select', 'assert_value'].includes(action.action)) return `${action.action === 'assert_value' ? 'assert value' : action.action} ${locator} <- \${test_data.${action.variableKey || ''}}`
     if (action.action === 'wait_visible') return `wait visible ${locator} timeout=${action.timeoutMs || 10000}`
     if (action.action === 'assert_visible') return `assert visible ${locator}`
     if (action.action === 'assert_text') return `assert text ${locator} contains ${JSON.stringify(action.expected || '')}`
     return ''
-  }).filter(Boolean).join('\n')
-  const row = ['TC001', `${workflow.name} case 1`, '[]', steps, ...variables.map((variable) => variable.defaultValue || ''), 'assert visible text="Replace with expected result"', 'normal', `workflow-v${version}`]
+  }
+  const finalAction = workflow.actions[workflow.actions.length - 1]
+  const finalAssertion = finalAction?.action.startsWith('assert_') ? ruleForAction(finalAction) : ''
+  const stepActions = finalAssertion ? workflow.actions.slice(0, -1) : workflow.actions
+  const steps = stepActions.map(ruleForAction).filter(Boolean).join('\n')
+  const row = ['TC001', `${workflow.name} case 1`, '[]', steps, ...variables.map((variable) => variable.defaultValue || ''), finalAssertion || 'assert visible text="Replace with expected result"', 'normal', `workflow-v${version}`]
   return [headers, row].map((items) => items.map(csvCell).join(',')).join('\r\n') + '\r\n'
 }
 

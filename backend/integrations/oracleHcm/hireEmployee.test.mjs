@@ -9,15 +9,22 @@ import {
   validateHiringRows,
 } from './hireEmployee.mjs'
 
-const header = 'employee_id,first_name,last_name,hire_date,legal_employer,action,action_reason,business_unit,position,email,phone,expected_outcome'
-const valid = 'test-001,Alex,Example,2026-11-02,Example Inc,HIRE,New position,Example BU,QA Analyst,alex@example.test,,success'
+const header = 'employee_id,first_name,last_name,legal_employer,action_reason,business_unit,position,email,phone,expected_outcome'
+const valid = 'test-001,Alex,Example,Example Inc,New position,Example BU,QA Analyst,alex@example.test,,success'
 
 test('parses schema v1 and preserves optional blank communication fields in memory', () => {
   const parsed = parseHiringCsv(`${header}\n${valid}`)
   assert.deepEqual(parsed.errors, [])
   assert.equal(parsed.rows.length, 1)
   assert.equal(parsed.rows[0].phone, '')
+  assert.equal(parsed.rows[0].hireDate, '')
+  assert.equal(parsed.rows[0].action, '')
   assert.equal(parsed.rows[0].expectedOutcome, 'success')
+})
+
+test('does not accept Hire Date or Hire Action CSV columns because Oracle supplies defaults', () => {
+  const parsed = parseHiringCsv(`${header},hire_date,action\n${valid},2026-11-02,HIRE`)
+  assert.match(parsed.errors.join(' '), /unsupported columns.*hire_date.*action/)
 })
 
 test('rejects unknown and duplicate headers without echoing personal row values', () => {
@@ -27,14 +34,13 @@ test('rejects unknown and duplicate headers without echoing personal row values'
   assert.match(parseHiringCsv(`${header},first_name\n${valid},Other`).errors.join(' '), /duplicate column headers/)
 })
 
-test('validates required fields, real calendar dates, emails, and live dropdown values', () => {
-  const parsed = parseHiringCsv(`${header}\n${valid}\ntest-002,Pat,Sample,2026-02-30,Missing Inc,HIRE,New position,Example BU,QA Analyst,bad-email,,success`)
+test('validates required fields, emails, and live dropdown values', () => {
+  const parsed = parseHiringCsv(`${header}\n${valid}\ntest-002,Pat,Sample,Missing Inc,New position,Example BU,QA Analyst,bad-email,,success`)
   const results = validateHiringRows(parsed.rows, { dropdownOptions: {
     legalEmployer: ['Example Inc'], action: ['HIRE'], actionReason: ['New position'], businessUnit: ['Example BU'], position: ['QA Analyst'],
   } })
   assert.equal(results[0].status, 'READY')
   assert.equal(results[1].status, 'INVALID')
-  assert.ok(results[1].errors.some((error) => error.includes('calendar date')))
   assert.ok(results[1].errors.some((error) => error.includes('available application option')))
   assert.ok(results[1].errors.some((error) => error.includes('email')))
 })

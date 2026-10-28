@@ -3,14 +3,13 @@ import Papa from 'papaparse'
 export const ORACLE_HCM_HIRING_SCHEMA_VERSION = '1.0'
 
 export const HIRING_COLUMNS = Object.freeze([
-  'employee_id', 'first_name', 'last_name', 'hire_date', 'legal_employer',
-  'action', 'action_reason', 'business_unit', 'position', 'email', 'phone',
-  'expected_outcome',
+  'employee_id', 'first_name', 'last_name', 'legal_employer', 'action_reason',
+  'business_unit', 'position', 'email', 'phone', 'expected_outcome',
 ])
 
 const REQUIRED_COLUMNS = Object.freeze([
-  'employee_id', 'first_name', 'last_name', 'hire_date', 'legal_employer',
-  'action', 'action_reason', 'business_unit', 'position',
+  'employee_id', 'first_name', 'last_name', 'legal_employer', 'action_reason',
+  'business_unit', 'position',
 ])
 const OUTCOMES = new Set(['success', 'validation_failure'])
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -44,9 +43,11 @@ export function parseHiringCsv(csvText) {
       employeeId: String(values.employee_id || '').trim(),
       firstName: String(values.first_name || '').trim(),
       lastName: String(values.last_name || '').trim(),
-      hireDate: String(values.hire_date || '').trim(),
+      // Hire Date and Hire Action are defaults in this Oracle workflow and
+      // intentionally do not come from the CSV.
+      hireDate: '',
       legalEmployer: String(values.legal_employer || '').trim(),
-      action: String(values.action || '').trim(),
+      action: '',
       actionReason: String(values.action_reason || '').trim(),
       businessUnit: String(values.business_unit || '').trim(),
       position: String(values.position || '').trim(),
@@ -68,13 +69,10 @@ export function validateHiringRows(rows, { dropdownOptions = {}, existingEmploye
   }
   return rows.map((row) => {
     const errors = []
-    for (const key of ['employeeId', 'firstName', 'lastName', 'hireDate', 'legalEmployer', 'action', 'actionReason', 'businessUnit', 'position']) {
+    for (const key of ['employeeId', 'firstName', 'lastName', 'legalEmployer', 'actionReason', 'businessUnit', 'position']) {
       if (!row[key]) errors.push(`${key} is required.`)
     }
     if (row.employeeId && !EMPLOYEE_ID.test(row.employeeId)) errors.push('employeeId has an unsupported format.')
-    if (row.hireDate && (!/^\d{4}-\d{2}-\d{2}$/.test(row.hireDate) || Number.isNaN(Date.parse(`${row.hireDate}T00:00:00Z`)) || new Date(`${row.hireDate}T00:00:00Z`).toISOString().slice(0, 10) !== row.hireDate)) {
-      errors.push('hireDate must be a real calendar date in YYYY-MM-DD format.')
-    }
     if (row.email && !EMAIL.test(row.email)) errors.push('email is not a valid email address.')
     if (row.expectedOutcome && !OUTCOMES.has(row.expectedOutcome)) errors.push('expectedOutcome must be success or validation_failure.')
     for (const [field, options] of Object.entries(dropdownOptions)) {

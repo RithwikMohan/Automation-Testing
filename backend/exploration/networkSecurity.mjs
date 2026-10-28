@@ -251,8 +251,65 @@ export function normalizeAllowedOrigin(value) {
   return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ''}`
 }
 
+/** Allow only known Oracle HCM page-data POSTs whose action names are read-only. */
+export function oracleHcmActionOperation(requestBody) {
+  if (typeof requestBody === 'string' && requestBody.length <= 64 * 1024) {
+    try { requestBody = JSON.parse(requestBody) } catch { return '' }
+  }
+  let visited = 0
+  const visit = (value, depth = 0) => {
+    if (!value || typeof value !== 'object' || depth > 8 || visited++ > 200) return ''
+    for (const [key, child] of Object.entries(value)) {
+      if (/^(?:operation|operationName)$/i.test(key) && typeof child === 'string' && /^[A-Za-z][A-Za-z0-9]{1,60}$/.test(child)) return child
+      const nested = visit(child, depth + 1)
+      if (nested) return nested
+    }
+    return ''
+  }
+  return visit(requestBody)
+}
+
+export function isOracleHcmReadPostAllowed({ method, targetUrl, contentType, applicationOrigin, requestBody }) {
+  if (method !== 'POST' || !targetUrl || typeof applicationOrigin !== 'string') return false
+  let sameOrigin = false
+  try { sameOrigin = normalizeAllowedOrigin(targetUrl.origin) === normalizeAllowedOrigin(applicationOrigin) } catch { return false }
+  if (!sameOrigin) return false
+  const type = String(contentType || '')
+  if (targetUrl.pathname === '/fscmUI/faces/AtkHomePageWelcome' && /^application\/x-www-form-urlencoded(?:;|$)/i.test(type)) return true
+  if (targetUrl.pathname === '/fscmUI/BIProxy' && /^application\/x-www-form-urlencoded(?:;|$)/i.test(type)) return true
+  if (!/^application\/vnd\.oracle\.adf\.action\+json(?:;|$)/i.test(type)) return false
+  if (/^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/(?:businessProcessTransactions\/action\/getConflictsForObjectObjectId|workerJourneys\/action\/findOrAssignContextualJourney)$/i.test(targetUrl.pathname)) return true
+  if (/^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/personHeaders\/action\/getPeopleEnterpriseInfo$/i.test(targetUrl.pathname)) return true
+  const operation = oracleHcmActionOperation(requestBody)
+  const apiVersionPrefix = /^\/hcmRestApi\/rest\/rv:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/en\/\d+(?:\.\d+)*:\d+\/employmentConfigurations\/action\//i
+  const autocompletePath = new RegExp(`${apiVersionPrefix.source}retriveEmploymentDataForAutoComplete$`, 'i')
+  if (autocompletePath.test(targetUrl.pathname)) return true
+  const employmentOperationsPath = new RegExp(`${apiVersionPrefix.source}performEmploymentOperations$`, 'i').test(targetUrl.pathname)
+  if (employmentOperationsPath) {
+    // These Oracle operations fetch dependent dropdown choices and action
+    // metadata for the employee wizard; they do not submit the employee form.
+    return ['getProfileOptionMap', 'populateHcmParams', 'dumpTxnSimulateMap', 'getActionDetails', 'getActionDetailsAndReason'].includes(operation)
+  }
+  const customChangePath = new RegExp(`${apiVersionPrefix.source}customChangeMethods$`, 'i').test(targetUrl.pathname)
+  // Oracle invokes these narrowly scoped onchange handlers to refresh
+  // dependent employee-wizard fields before any employee Submit action.
+  return customChangePath && ['OnBusinessUnitChange', 'onLegalEmployerChange'].includes(operation)
+}
+
+async function readLimitedRequestBody(request, maxBytes = 64 * 1024) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > maxBytes) throw new Error('Request body exceeds the Oracle page-action inspection limit.')
+    chunks.push(chunk)
+  }
+  const buffer = Buffer.concat(chunks)
+  return { buffer, json: JSON.parse(buffer.toString('utf8')) }
+}
+
 /** Permit login submissions to origins visited during the user-attended manual auth gate. */
-export function isManualLoginPostAllowed({ method, targetUrl, contentType, accessControlRequestMethod, manualAuthOrigin, manualAuthOrigins, manualAuthPaths, isManualAuthActive }) {
+export function isManualLoginPostAllowed({ method, targetUrl, contentType, accessControlRequestMethod, isDocumentNavigation, manualAuthOrigin, manualAuthOrigins, manualAuthPaths, isManualAuthActive }) {
   const isPreflight = method === 'OPTIONS'
   if ((!isPreflight && method !== 'POST') || typeof manualAuthOrigin !== 'string' || typeof isManualAuthActive !== 'function' || !isManualAuthActive()) return false
   // CORS preflight is non-mutating, but must be limited to a POST preflight for
@@ -285,6 +342,10 @@ export function isManualLoginPostAllowed({ method, targetUrl, contentType, acces
     const pathIsObserved = manualAuthPaths instanceof Set && manualAuthPaths.has(target.pathname)
     if (!pathIsObserved) return false
   }
+  // HTML form submissions used by federated identity providers are top-level
+  // document navigations. Their enctype may be provider-specific; the active
+  // login window and approved origin are the relevant scope for these requests.
+  if (isDocumentNavigation === true) return true
   if (isPreflight) return true
   return /^application\/(x-www-form-urlencoded|multipart\/form-data|json)(?:;|$)/i.test(String(contentType || ''))
 }
@@ -433,6 +494,7 @@ export async function createSecurityProxy(config) {
     isManualAuthActive = () => false,
     isApprovedWriteRequest = () => false,
     isApprovedWorkflowPostback = () => false,
+    isOracleHcmReadPost = () => false,
     manualCaptureRequestAllowed = () => false,
     allowPublicOrigins = false,
   } = config
@@ -452,7 +514,7 @@ export async function createSecurityProxy(config) {
 
   const activeSockets = new Set()
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     // Handle standard HTTP requests
     let targetUrl
     try {
@@ -463,20 +525,41 @@ export async function createSecurityProxy(config) {
       return res.end('Bad Request: Malformed destination URL.')
     }
 
+    const contentType = req.headers['content-type']
+    let inspectedBody = null
+    let inspectedBodyBuffer = null
+    const needsOracleActionInspection = req.method === 'POST'
+      && /^application\/vnd\.oracle\.adf\.action\+json(?:;|$)/i.test(String(contentType || ''))
+      && targetUrl.origin === primaryOrigin
+      && /\/employmentConfigurations\/action\/(?:performEmploymentOperations|customChangeMethods)$/i.test(targetUrl.pathname)
+    if (needsOracleActionInspection) {
+      try {
+        const body = await readLimitedRequestBody(req)
+        inspectedBody = body.json
+        inspectedBodyBuffer = body.buffer
+      } catch {
+        audit('ORACLE_ACTION_BODY_REJECTED', targetUrl.href, { category: 'request', reason: 'Oracle page-action body could not be safely inspected.' })
+        res.writeHead(413, { 'content-type': 'text/plain' })
+        return res.end('Oracle page action body could not be safely inspected.')
+      }
+    }
+
     const manualLoginPost = isManualLoginPostAllowed({
       method: req.method,
       targetUrl,
-      contentType: req.headers['content-type'],
+      contentType,
       accessControlRequestMethod: req.headers['access-control-request-method'],
+      isDocumentNavigation: req.headers['sec-fetch-dest'] === 'document' && req.headers['sec-fetch-mode'] === 'navigate',
       manualAuthOrigin,
       manualAuthOrigins,
       manualAuthPaths,
       isManualAuthActive,
     })
-    const approvedWritePost = isApprovedWriteRequest({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
-    const approvedWorkflowPostback = isApprovedWorkflowPostback({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
-    const manuallyCapturedWrite = manualCaptureRequestAllowed({ method: req.method, targetUrl, contentType: req.headers['content-type'] }) === true
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !manualLoginPost && !approvedWritePost && !approvedWorkflowPostback && !manuallyCapturedWrite) {
+    const approvedWritePost = isApprovedWriteRequest({ method: req.method, targetUrl, contentType }) === true
+    const approvedWorkflowPostback = isApprovedWorkflowPostback({ method: req.method, targetUrl, contentType }) === true
+    const oracleHcmReadPost = isOracleHcmReadPost({ method: req.method, targetUrl, contentType, requestBody: inspectedBody }) === true
+    const manuallyCapturedWrite = manualCaptureRequestAllowed({ method: req.method, targetUrl, contentType }) === true
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !manualLoginPost && !approvedWritePost && !approvedWorkflowPostback && !oracleHcmReadPost && !manuallyCapturedWrite) {
       audit('OUT_OF_SCOPE', targetUrl.href, { category: 'unknown', reason: 'Read-only policy blocks non-GET/HEAD requests.' })
       res.writeHead(403, { 'content-type': 'text/plain' })
       return res.end('Forbidden by read-only policy.')
@@ -500,12 +583,17 @@ export async function createSecurityProxy(config) {
       .then(({ pinnedIp }) => {
         const destIp = testTargetIp || pinnedIp
         const destPort = testTargetPort || targetPort
+        const proxyHeaders = { ...req.headers, host: targetUrl.host }
+        if (inspectedBodyBuffer) {
+          delete proxyHeaders['transfer-encoding']
+          proxyHeaders['content-length'] = String(inspectedBodyBuffer.length)
+        }
         const proxyReq = http.request({
           host: destIp,
           port: destPort,
           method: req.method,
           path: targetUrl.pathname + targetUrl.search,
-          headers: { ...req.headers, host: targetUrl.host },
+          headers: proxyHeaders,
           timeout: connectTimeoutMs,
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers)
@@ -535,7 +623,8 @@ export async function createSecurityProxy(config) {
           }
         })
 
-        req.pipe(proxyReq)
+        if (inspectedBodyBuffer) proxyReq.end(inspectedBodyBuffer)
+        else req.pipe(proxyReq)
       })
       .catch((err) => {
         const outcome = classifyDestinationError(err)
