@@ -805,3 +805,240 @@
 }
 
 .workflow-builder-backdrop{z-index:30;align-items:start;overflow:auto}.workflow-builder{width:min(1120px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px}.workflow-builder h3{font-size:13px;margin:0 0 4px}.workflow-editor-heading{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px}.workflow-editor-heading label span{font-size:11px;color:#e6eafa;background:#0d1425;border:1px solid var(--border);border-radius:6px;padding:10px}.workflow-editor-section{border-top:1px solid var(--border);padding:16px 0}.workflow-editor-section>.card-heading{align-items:center;margin-bottom:12px}.workflow-editor-section>.card-heading p{font-size:10px;color:var(--muted);margin:4px 0 0}.workflow-action-editor{padding:12px;margin:10px 0;background:#0d1425;border:1px solid var(--border);border-radius:8px}.workflow-action-top{display:grid;grid-template-columns:150px minmax(120px,1fr) auto;align-items:center;gap:10px;margin-bottom:10px}.workflow-action-top strong{font-size:11px;text-transform:capitalize}.workflow-action-top>span{font-size:10px;color:var(--cyan);overflow:hidden;text-overflow:ellipsis}.workflow-action-buttons,.workflow-toolbar,.workflow-builder-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.workflow-action-buttons button{background:#172139;color:#b8c2d6;border:1px solid var(--border);border-radius:5px;padding:5px 7px;font-size:9px}.workflow-action-fields{display:grid;grid-template-columns:repeat(3,minmax(140px,1fr));gap:10px}.workflow-context-fields{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(140px,1fr));gap:9px;padding:10px;border:1px solid #34405a;border-radius:7px;background:#111a2e}.workflow-context-fields label{font-size:9px}.workflow-context-fields input,.workflow-action-fields input,.workflow-action-fields select,.workflow-variable-row input,.workflow-variable-row select{min-width:0}.workflow-variable-row{display:grid;grid-template-columns:1fr 1.2fr .75fr 1fr 1fr auto auto;align-items:end;gap:8px;margin:9px 0;padding:10px;background:#0d1425;border:1px solid var(--border);border-radius:7px}.workflow-variable-required{display:flex;align-items:center;gap:5px;white-space:nowrap}.workflow-variable-required input{accent-color:var(--cyan)}.workflow-csv-preview{width:100%;color:#c3cce0;background:#0a1020;border:1px solid var(--border);border-radius:7px;padding:10px;font:10px 'DM Mono',monospace;resize:vertical}.workflow-builder-actions{justify-content:flex-end;border-top:1px solid var(--border);padding-top:15px}.workflow-csv-errors,.workflow-error-inline{color:#ffb4a9;background:#352527;border:1px solid #5a3538;border-radius:6px;padding:9px;font-size:10px;margin-top:8px}.workflow-valid{display:block;color:var(--cyan);font-size:10px;margin-top:8px}.workflow-editor-section input[type=file]{font-size:10px}.workflow-builder .info-banner{margin-bottom:10px}.workflow-builder .button{font-size:10px}@media(max-width:780px){.workflow-action-top{grid-template-columns:1fr auto}.workflow-action-top>span{grid-column:1/-1;grid-row:2}.workflow-action-fields,.workflow-context-fields{grid-template-columns:1fr 1fr}.workflow-editor-heading{grid-template-columns:1fr}.workflow-variable-row{grid-template-columns:1fr 1fr}.workflow-builder{padding:14px;max-height:100vh}}
+
+
+/* ==========================================================================
+   Modern Spacing & Typography Refinements (User Polish)
+   ========================================================================== */
+
+/* Enhanced Base Typography & Spacing */
+.content {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 36px 44px;
+}
+
+.page {
+  gap: 28px;
+}
+
+.page-heading {
+  margin-bottom: 8px;
+}
+
+.page-heading h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: #f8fafc;
+}
+
+.page-heading p {
+  font-size: 14px;
+  color: #94a3b8;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--cyan, #21d4d8);
+  text-transform: uppercase;
+}
+
+/* Card Improvements */
+.card {
+  background: #0e1528;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+/* Better Input and Select Controls */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
+  font-size: 13.5px !important;
+  color: #f1f5f9;
+}
+
+.search-field input {
+  font-size: 13.5px !important;
+}
+
+/* Navigation Spacing */
+.sidebar {
+  width: 255px;
+  padding: 26px 16px;
+}
+
+.nav-item {
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  gap: 13px;
+  border-radius: 9px;
+}
+
+.nav-item svg {
+  width: 19px;
+  height: 19px;
+}
+
+/* Tab Bar Styling */
+.workflow-tabs {
+  display: flex;
+  gap: 8px;
+  background: #090e1c;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid #1e293b;
+  width: fit-content;
+}
+
+.workflow-tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #94a3b8;
+  transition: all 0.2s ease;
+}
+
+.workflow-tab-btn:hover {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.workflow-tab-btn.active {
+  background: #17213d;
+  color: #21d4d8;
+  box-shadow: 0 2px 10px rgba(33, 212, 216, 0.15);
+}
+
+/* Enhanced Table Styling */
+.table-wrap table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13.5px;
+}
+
+.table-wrap th {
+  padding: 14px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  background: #0a1020;
+  border-bottom: 1px solid #1e293b;
+}
+
+.table-wrap td {
+  padding: 14px 16px;
+  font-size: 13.5px;
+  color: #cbd5e1;
+  border-bottom: 1px solid #151d32;
+  vertical-align: middle;
+}
+
+.table-wrap tr:hover td {
+  background: rgba(33, 212, 216, 0.03);
+}
+
+/* Enhanced Buttons */
+.button {
+  font-size: 13px !important;
+  font-weight: 600;
+  padding: 9px 16px !important;
+  border-radius: 8px;
+  transition: all 0.15s ease;
+}
+
+.button-primary {
+  background: linear-gradient(135deg, #6366f1 0%, #21d4d8 100%) !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3) !important;
+}
+
+.button-primary:hover:not(:disabled) {
+  opacity: 0.95;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(33, 212, 216, 0.4) !important;
+}
+
+.button-secondary {
+  background: #131b30 !important;
+  border: 1px solid #24314d !important;
+  color: #cbd5e1 !important;
+}
+
+.button-secondary:hover:not(:disabled) {
+  background: #1a2542 !important;
+  border-color: #3b82f6 !important;
+  color: #ffffff !important;
+}
+
+/* Badges */
+.badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.02em;
+}
+
+.badge-passed, .badge-ready, .badge-verified_read_only {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.badge-failed, .badge-invalid, .badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.badge-running, .badge-in-progress, .badge-partial {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badge-updated {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+
+/* ==========================================================================
+   Luxury Metrics & Executive Charts Styling
+   ========================================================================== */
+
+.luxury-metric-card {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease;
+}
+
+.luxury-metric-card:hover {
+  transform: translateY(-4px);
+}
+
+@media (max-width: 1024px) {
+  .overview-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .metric-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

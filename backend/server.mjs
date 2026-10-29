@@ -40,6 +40,7 @@ import {
   listBrowserTestExecutions,
   getBrowserTestExecutionById,
   getBrowserTestArtifactById,
+  listAllBrowserTestArtifacts,
   interruptOrphanedBrowserTestExecutions,
   getBrowserTestStats,
 } from './database.mjs'
@@ -887,6 +888,13 @@ const server = createServer(async (request, response) => {
         completedAt, durationMs: 0, videoStatus: 'NOT_REQUESTED',
       })
       return json(response, 201, { id: execution.id, status: 'SKIPPED' })
+    } catch (error) { return phase1Error(response, error) }
+  }
+
+  if (pathname === '/api/browser-tests/all-artifacts' && request.method === 'GET') {
+    try {
+      const limit = Number(searchParams.get('limit') || 100)
+      return json(response, 200, await listAllBrowserTestArtifacts(limit))
     } catch (error) { return phase1Error(response, error) }
   }
 

@@ -80,16 +80,9 @@ const chartData: { day: string; passed: number; failed: number }[] = []
 const nav = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'applications', label: 'Applications', icon: Globe },
-  { id: 'create-automation', label: 'Create Automation', icon: Sparkles },
-  { id: 'automations', label: 'Task Definitions', icon: List },
-  { id: 'task-planner', label: 'Task Planner', icon: Sparkles },
-  { id: 'browser-tests', label: 'Rule-Based Tests', icon: CheckCircle2 },
-  { id: 'hcm-hiring', label: 'Oracle HCM Hiring', icon: ShieldCheck },
-  { id: 'upload', label: 'Upload Test Cases', icon: CloudUpload },
-  { id: 'runs', label: 'Test Runs', icon: GitBranch },
+  { id: 'browser-tests', label: 'Workflow Tests', icon: CheckCircle2 },
   { id: 'recordings', label: 'Recordings', icon: Film },
   { id: 'reports', label: 'Reports', icon: BarChart3 },
-  { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ] as const
 
 function maskUser(value: string) { return value.length <= 3 ? '••••' : `${value.slice(0, 2)}•••${value.slice(-2)}` }
@@ -120,7 +113,159 @@ function validate(row: Record<string, string>, index: number): Row {
 
 function StatusBadge({ status }: { status: string }) { return <span className={`badge badge-${status.toLowerCase().replaceAll(' ', '-')}`}>{status === 'Passed' && <Check size={12} />}{status}</span> }
 function ValidationBadge({ value }: { value: Validation }) { return <span className={`badge validation-${value.toLowerCase().replaceAll(' ', '-')}`}>{value}</span> }
-function Metric({ icon: Icon, label, value, trend, color }: { icon: typeof Activity; label: string; value: string; trend: string; color: string }) { return <motion.div whileHover={{ y: -4 }} className={`metric card`}><div className={`metric-icon ${color}`}><Icon size={19} /></div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-trend"><ArrowUpRight size={13} /> {trend}</div></motion.div> }
+function Metric({
+  icon: Icon,
+  label,
+  value,
+  trend,
+  color,
+}: {
+  icon: typeof Activity
+  label: string
+  value: string
+  trend: string
+  color: string
+}) {
+  const colorGradients: Record<string, { bg: string; border: string; glow: string; text: string; iconBg: string }> = {
+    violet: {
+      bg: 'linear-gradient(135deg, rgba(155, 124, 255, 0.08) 0%, rgba(13, 20, 36, 0.95) 100%)',
+      border: 'rgba(155, 124, 255, 0.25)',
+      glow: 'rgba(155, 124, 255, 0.15)',
+      text: '#c4b5fd',
+      iconBg: 'rgba(155, 124, 255, 0.15)',
+    },
+    cyan: {
+      bg: 'linear-gradient(135deg, rgba(33, 212, 216, 0.08) 0%, rgba(13, 20, 36, 0.95) 100%)',
+      border: 'rgba(33, 212, 216, 0.25)',
+      glow: 'rgba(33, 212, 216, 0.15)',
+      text: '#21d4d8',
+      iconBg: 'rgba(33, 212, 216, 0.15)',
+    },
+    orange: {
+      bg: 'linear-gradient(135deg, rgba(244, 63, 94, 0.08) 0%, rgba(13, 20, 36, 0.95) 100%)',
+      border: 'rgba(244, 63, 94, 0.25)',
+      glow: 'rgba(244, 63, 94, 0.15)',
+      text: '#fb7185',
+      iconBg: 'rgba(244, 63, 94, 0.15)',
+    },
+    blue: {
+      bg: 'linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(13, 20, 36, 0.95) 100%)',
+      border: 'rgba(59, 130, 246, 0.25)',
+      glow: 'rgba(59, 130, 246, 0.15)',
+      text: '#60a5fa',
+      iconBg: 'rgba(59, 130, 246, 0.15)',
+    },
+    emerald: {
+      bg: 'linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(13, 20, 36, 0.95) 100%)',
+      border: 'rgba(16, 185, 129, 0.25)',
+      glow: 'rgba(16, 185, 129, 0.15)',
+      text: '#34d399',
+      iconBg: 'rgba(16, 185, 129, 0.15)',
+    },
+  }
+
+  const theme = colorGradients[color] || colorGradients.cyan
+
+  return (
+    <motion.div
+      whileHover={{ y: -4, borderColor: theme.text, boxShadow: `0 12px 28px ${theme.glow}` }}
+      transition={{ duration: 0.2 }}
+      className="metric card luxury-metric-card"
+      style={{
+        background: theme.bg,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 14,
+        padding: '22px 24px',
+        position: 'relative',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'space-between',
+        minHeight: 140,
+        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.35)',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          top: -20,
+          right: -20,
+          width: 90,
+          height: 90,
+          borderRadius: '50%',
+          background: theme.glow,
+          filter: 'blur(28px)',
+          pointerEvents: 'none',
+        }}
+      />
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', position: 'relative', zIndex: 1 }}>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            color: '#94a3b8',
+          }}
+        >
+          {label}
+        </span>
+        <div
+          style={{
+            width: 38,
+            height: 38,
+            borderRadius: 10,
+            background: theme.iconBg,
+            border: `1px solid ${theme.border}`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: theme.text,
+            boxShadow: `0 2px 10px ${theme.glow}`,
+          }}
+        >
+          <Icon size={19} />
+        </div>
+      </div>
+
+      <div style={{ margin: '14px 0 10px 0', position: 'relative', zIndex: 1 }}>
+        <div
+          style={{
+            fontSize: 34,
+            fontWeight: 800,
+            letterSpacing: '-0.03em',
+            color: '#f8fafc',
+            lineHeight: 1.1,
+          }}
+        >
+          {value}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative', zIndex: 1 }}>
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            padding: '4px 10px',
+            borderRadius: 6,
+            background: 'rgba(255, 255, 255, 0.05)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
+            fontSize: 12,
+            fontWeight: 600,
+            color: theme.text,
+          }}
+        >
+          <ArrowUpRight size={13} />
+          <span>{trend}</span>
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
 function PageHeader({ eyebrow, title, description, action }: { eyebrow?: string; title: string; description?: string; action?: React.ReactNode }) { return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{action}</div> }
 
 function App() {
@@ -1532,7 +1677,7 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
   const previousRate = periodPassRate(previousPeriodRuns)
   const trendChange = currentRate !== null && previousRate !== null ? currentRate - previousRate : null
 
-  const ringRadius = 54
+  const ringRadius = 58
   const ringCircumference = 2 * Math.PI * ringRadius
   const ringOffset = ringCircumference - (passRate / 100) * ringCircumference
 
@@ -1554,89 +1699,219 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
     }
   })
 
-  return <motion.div key="overview" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
-    <PageHeader eyebrow="DASHBOARD" title="Overview" description="Chronos automation platform — monitor reliability, activity, and test results." action={<button className="button button-primary" onClick={() => navigate('upload')}><CloudUpload size={16} /> Upload test cases</button>} />
-    <div className="metric-grid">
-      <Metric icon={Activity} label="Total cases" value={String(totals.total)} trend="All processed" color="violet" />
-      <Metric icon={CheckCircle2} label="Passed" value={String(totals.passed)} trend={completed > 0 ? `${passRate.toFixed(1)}% pass rate` : 'No results yet'} color="cyan" />
-      <Metric icon={AlertTriangle} label="Failed" value={String(totals.failed)} trend="Needs attention" color="orange" />
-      <Metric icon={Clock3} label="Runs" value={String(runs.length)} trend="Total executed" color="blue" />
-    </div>
-    <div className="overview-grid">
-      <section className="card reliability-card">
-        {runs.length === 0 ? (
-          <div className="reliability-empty">
-            <Activity size={32} />
-            <strong>No automation data yet</strong>
-            <span>Upload a CSV and run the backend automation to see reliability metrics.</span>
-          </div>
-        ) : (
-          <>
-            <div className="reliability-header">
-              <div>
-                <div className="eyebrow">AUTOMATION RELIABILITY</div>
-                <h2>Pass Rate</h2>
-              </div>
-              <div className="reliability-kpi-grid">
-                <div className="kpi-item"><span className="kpi-value cyan">{totals.passed}</span><span className="kpi-label">Passed</span></div>
-                <div className="kpi-item"><span className="kpi-value orange">{totals.failed}</span><span className="kpi-label">Failed</span></div>
-                {totals.partial > 0 && <div className="kpi-item"><span className="kpi-value amber">{totals.partial}</span><span className="kpi-label">Partial</span></div>}
-                {pending > 0 && <div className="kpi-item"><span className="kpi-value">{pending}</span><span className="kpi-label">Pending</span></div>}
-              </div>
+  return (
+    <motion.div key="overview" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
+      <PageHeader
+        eyebrow="EXECUTIVE DASHBOARD"
+        title="Overview"
+        description="Monitor system health, automation reliability, and simulated execution outcomes in real-time."
+        action={
+          <button className="button button-primary" onClick={() => navigate('upload')}>
+            <CloudUpload size={16} /> Upload Test Cases
+          </button>
+        }
+      />
+
+      {/* Top 4 Luxury Metric Cards */}
+      <div className="metric-grid">
+        <Metric icon={Activity} label="Total Cases Processed" value={String(totals.total)} trend="Verified Cases" color="violet" />
+        <Metric icon={CheckCircle2} label="Automation Passed" value={String(totals.passed)} trend={completed > 0 ? `${passRate.toFixed(1)}% Success` : 'No Data'} color="cyan" />
+        <Metric icon={AlertTriangle} label="Failed / Blocked" value={String(totals.failed)} trend="Requires Review" color="orange" />
+        <Metric icon={Clock3} label="Total Runs Executed" value={String(runs.length)} trend="Persisted Executions" color="blue" />
+      </div>
+
+      <div className="overview-grid" style={{ display: 'grid', gridTemplateColumns: '1.45fr 1fr', gap: 24, marginTop: 4 }}>
+        {/* Luxury Automation Health & Reliability Card */}
+        <section className="card reliability-card" style={{ padding: '28px 32px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
+          {runs.length === 0 ? (
+            <div className="reliability-empty" style={{ padding: '50px 20px', textAlign: 'center' }}>
+              <Activity size={36} style={{ color: '#21d4d8', margin: '0 auto 12px' }} />
+              <strong style={{ display: 'block', fontSize: 17, marginBottom: 6 }}>No automation data yet</strong>
+              <span style={{ color: '#94a3b8', fontSize: 13 }}>Upload a CSV or execute a test suite to populate reliability metrics.</span>
             </div>
-            <div className="reliability-trend">
-              <div className="trend-header">
-                <div className="trend-title"><Clock3 size={13} /><span>7-Day Reliability Trend</span></div>
-                {trendChange !== null ? (
-                  <div className="trend-indicator">
-                    <div className={`trend-value ${trendChange >= 0 ? 'trend-up' : 'trend-down'}`}>
-                      {trendChange >= 0 ? '+' : ''}{trendChange.toFixed(1)} pts
-                      {trendChange >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
-                    </div>
-                    <span className="trend-label">vs previous period</span>
-                  </div>
-                ) : (
-                  <div className="trend-indicator trend-empty"><span className="trend-label">Not enough historical data</span></div>
-                )}
+          ) : (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                <div>
+                  <div className="eyebrow" style={{ color: '#21d4d8' }}>SYSTEM RELIABILITY INDEX</div>
+                  <h2 style={{ fontSize: 22, marginTop: 4, color: '#f8fafc' }}>Automation Health & Pass Rate</h2>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(33, 212, 216, 0.1)', border: '1px solid rgba(33, 212, 216, 0.3)', padding: '6px 14px', borderRadius: 20 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#21d4d8', boxShadow: '0 0 10px #21d4d8' }} />
+                  <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', color: '#21d4d8' }}>
+                    {passRate >= 80 ? 'OPTIMAL HEALTH' : passRate >= 50 ? 'STABLE' : 'ATTENTION REQUIRED'}
+                  </span>
+                </div>
               </div>
-              <div className="sparkline-wrap">
-                <ResponsiveContainer width="100%" height={160}>
-                  <AreaChart data={sparklineData} margin={{ top: 10, right: 12, left: -22, bottom: 0 }}>
+
+              {/* Dual-Column Layout: Left Gauge, Right Stat Tiles */}
+              <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 28, alignItems: 'center', paddingBottom: 24, borderBottom: '1px solid #1e293b' }}>
+                {/* Glowing Circular Gauge */}
+                <div style={{ position: 'relative', width: 160, height: 160, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <svg width="160" height="160" style={{ transform: 'rotate(-90deg)' }}>
+                    <circle cx="80" cy="80" r={ringRadius} stroke="#17223b" strokeWidth="12" fill="transparent" />
+                    <circle
+                      cx="80"
+                      cy="80"
+                      r={ringRadius}
+                      stroke="url(#reliability-gauge-grad)"
+                      strokeWidth="12"
+                      strokeDasharray={ringCircumference}
+                      strokeDashoffset={ringOffset}
+                      strokeLinecap="round"
+                      fill="transparent"
+                      style={{ transition: 'stroke-dashoffset 1s ease' }}
+                    />
                     <defs>
-                      <linearGradient id="sparkline-gradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
-                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                      <linearGradient id="reliability-gauge-grad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stopColor="#21d4d8" />
+                        <stop offset="100%" stopColor="#10b981" />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1b243b" />
-                    <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#707c97' }} axisLine={{ stroke: '#1b243b' }} tickLine={false} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#707c97' }} axisLine={{ stroke: '#1b243b' }} tickLine={false} unit="%" />
-                    <Tooltip
-                      content={({ active, payload }: { active?: boolean; payload?: any[] }) => {
-                        if (active && payload && payload[0]) {
-                          const d = payload[0].payload
-                          return (
-                            <div className="recharts-tooltip">
-                              <div style={{ fontWeight: 600, color: '#e8ebf5' }}>{d.day} ({d.date})</div>
-                              <div style={{ color: '#10b981', fontSize: 11 }}>Passed: {d.passed}</div>
-                              <div style={{ color: '#ef4444', fontSize: 11 }}>Failed: {d.failed}</div>
-                              <div style={{ color: '#21d4d8', fontSize: 11, fontWeight: 600 }}>Rate: {d.rate.toFixed(1)}%</div>
-                            </div>
-                          )
-                        }
-                        return null
-                      }}
-                    />
-                    <Area type="monotone" dataKey="rate" fill="url(#sparkline-gradient)" stroke="#10b981" strokeWidth={2} />
-                  </AreaChart>
-                </ResponsiveContainer>
+                  </svg>
+                  <div style={{ position: 'absolute', textAlign: 'center' }}>
+                    <div style={{ fontSize: 28, fontWeight: 800, color: '#f8fafc', lineHeight: 1 }}>
+                      {passRate.toFixed(1)}%
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 4 }}>
+                      Pass Rate
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2x2 Luxury KPI Stat Grid */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div style={{ background: '#090e1c', border: '1px solid rgba(33, 212, 216, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#21d4d8', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Passed</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.passed}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{totals.total > 0 ? Math.round((totals.passed / totals.total) * 100) : 0}% of all cases</div>
+                  </div>
+
+                  <div style={{ background: '#090e1c', border: '1px solid rgba(244, 63, 94, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#f43f5e', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Failed</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.failed}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Requires fix</div>
+                  </div>
+
+                  <div style={{ background: '#090e1c', border: '1px solid rgba(251, 191, 36, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#fbbf24', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Partial / Warn</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.partial}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Handled with note</div>
+                  </div>
+
+                  <div style={{ background: '#090e1c', border: '1px solid rgba(155, 124, 255, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#c4b5fd', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Total Runs</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{runs.length}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>In historical log</div>
+                  </div>
+                </div>
               </div>
+
+              {/* Bottom: 7-Day Trend Sparkline */}
+              <div style={{ marginTop: 22 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 600, color: '#cbd5e1' }}>
+                    <Clock3 size={15} color="#21d4d8" />
+                    <span>7-Day Reliability Trajectory</span>
+                  </div>
+                  {trendChange !== null ? (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 6, background: trendChange >= 0 ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', border: `1px solid ${trendChange >= 0 ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`, fontSize: 12, fontWeight: 600, color: trendChange >= 0 ? '#34d399' : '#f87171' }}>
+                      {trendChange >= 0 ? '+' : ''}{trendChange.toFixed(1)} pts
+                      {trendChange >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
+                      <span style={{ color: '#94a3b8', fontSize: 11, fontWeight: 400 }}>vs prior period</span>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: '#64748b' }}>Baseline tracking</span>
+                  )}
+                </div>
+
+                <div style={{ height: 160, width: '100%' }}>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <AreaChart data={sparklineData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="overview-trend-gradient" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#21d4d8" stopOpacity={0.35} />
+                          <stop offset="95%" stopColor="#21d4d8" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                      <XAxis dataKey="day" tick={{ fontSize: 12, fill: '#94a3b8' }} axisLine={{ stroke: '#1e293b' }} tickLine={false} />
+                      <YAxis domain={[0, 100]} tick={{ fontSize: 12, fill: '#94a3b8' }} axisLine={{ stroke: '#1e293b' }} tickLine={false} unit="%" />
+                      <Tooltip
+                        content={({ active, payload }) => {
+                          if (active && payload && payload[0]) {
+                            const d = payload[0].payload
+                            return (
+                              <div style={{ background: '#0a1020', border: '1px solid #1e293b', borderRadius: 8, padding: '10px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
+                                <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 12, marginBottom: 4 }}>{d.day} ({d.date})</div>
+                                <div style={{ color: '#21d4d8', fontSize: 12, fontWeight: 600 }}>Pass Rate: {d.rate.toFixed(1)}%</div>
+                                <div style={{ color: '#94a3b8', fontSize: 11 }}>Passed: {d.passed} · Failed: {d.failed}</div>
+                              </div>
+                            )
+                          }
+                          return null
+                        }}
+                      />
+                      <Area type="monotone" dataKey="rate" fill="url(#overview-trend-gradient)" stroke="#21d4d8" strokeWidth={2.5} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+
+        {/* Latest Activity Card */}
+        <section className="card activity-card" style={{ padding: '28px 28px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
+          <div className="card-heading" style={{ marginBottom: 18 }}>
+            <div>
+              <div className="eyebrow" style={{ color: '#c4b5fd' }}>EVENT STREAM</div>
+              <h2 style={{ fontSize: 20, marginTop: 4, color: '#f8fafc' }}>Latest Automation Runs</h2>
+              <p style={{ fontSize: 13, color: '#94a3b8' }}>Real-time execution log from storage</p>
             </div>
-          </>
-        )}
-      </section><section className="card activity-card"><div className="card-heading"><div><h2>Latest activity</h2><p>Persisted automation runs</p></div></div>{runs.length ? <div className="activity-list">{runs.slice(0, 4).map(run => <ActivityItem key={run.id} icon={run.status === 'Failed' ? AlertTriangle : CheckCircle2} color={run.status === 'Failed' ? 'orange' : run.status === 'Partial' ? 'amber' : 'cyan'} title={`${run.status} run`} detail={`${run.file} · ${run.total} cases`} time={new Date(run.created).toLocaleString()} />)}</div> : <div className="empty-recordings"><Activity size={28} /><strong>No activity yet</strong><span>Processed runs will appear here.</span></div>}</section></div>
-  <section className="card runs-card"><div className="card-heading"><div><h2>Recent test runs</h2><p>Monitor your latest simulated executions</p></div><button className="text-button" onClick={() => navigate('runs')}>View all runs <ArrowUpRight size={14} /></button></div><RunsTable runs={runs.slice(0, 3)} openRun={(r) => navigate('run-detail')} /></section>
-</motion.div> }
+          </div>
+          {runs.length ? (
+            <div className="activity-list" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {runs.slice(0, 5).map(run => (
+                <ActivityItem
+                  key={run.id}
+                  icon={run.status === 'Failed' ? AlertTriangle : CheckCircle2}
+                  color={run.status === 'Failed' ? 'orange' : run.status === 'Partial' ? 'amber' : 'cyan'}
+                  title={`${run.status} Run`}
+                  detail={`${run.file} · ${run.total} cases`}
+                  time={new Date(run.created).toLocaleString()}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="empty-recordings" style={{ padding: '40px 10px', textAlign: 'center' }}>
+              <Activity size={32} style={{ color: '#64748b', margin: '0 auto 10px' }} />
+              <strong style={{ display: 'block', fontSize: 15, color: '#cbd5e1' }}>No activity yet</strong>
+              <span style={{ fontSize: 12, color: '#64748b' }}>Processed runs will stream here automatically.</span>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* Recent Test Runs Section */}
+      <section className="card runs-card" style={{ padding: '24px 28px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14, marginTop: 8 }}>
+        <div className="card-heading" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div className="eyebrow">PERSISTED RUNS</div>
+            <h2 style={{ fontSize: 20, marginTop: 4, color: '#f8fafc' }}>Recent Test Runs</h2>
+            <p style={{ fontSize: 13, color: '#94a3b8' }}>Monitor and inspect execution results and case breakdowns</p>
+          </div>
+          <button className="button button-secondary" onClick={() => navigate('runs')} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>View All Runs</span>
+            <ArrowUpRight size={14} />
+          </button>
+        </div>
+        <RunsTable runs={runs.slice(0, 4)} openRun={() => navigate('run-detail')} />
+      </section>
+    </motion.div>
+  )
+}
+
 function ActivityItem({ icon: Icon, color, title, detail, time }: { icon: typeof Activity; color: string; title: string; detail: string; time: string }) { return <div className="activity-item"><div className={`activity-icon ${color}`}><Icon size={15} /></div><div><strong>{title}</strong><span>{detail}</span></div><time>{time}</time></div> }
 
 function UploadPage({ rows, fileName, fileRef, selectFile, setRows, setFileName, validRows, processUpload, isProcessing, validateReadOnly, isReadOnlyValidating, autoUpdateOnUpload }: { rows: Row[]; fileName: string; fileRef: React.RefObject<HTMLInputElement>; selectFile: (file?: File) => void; setRows: (r: Row[]) => void; setFileName: (s: string) => void; validRows: number; processUpload: () => void; isProcessing: boolean; validateReadOnly: () => void; isReadOnlyValidating: boolean; autoUpdateOnUpload: boolean }) {
@@ -1665,138 +1940,778 @@ function RunsPage({ runs, search, setSearch, openRun }: { runs: Run[]; search: s
   return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page"><PageHeader eyebrow="EXECUTION HISTORY" title="Test runs" description="Inspect simulated automation runs and their outcomes." action={<button className="button button-primary"><Plus size={16} /> New run</button>} /><div className="toolbar card"><div className="search-field"><Search size={16} /><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by run ID or filename..." /></div><div className="filter-tabs">{Object.entries(statusCounts).map(([label, count]) => <button key={label} className={statusFilter === (label as Status | 'All runs') ? 'selected' : ''} onClick={() => setStatusFilter(label as Status | 'All runs')}>{label} <span className="badge-count">{count}</span></button>)}</div><button className="select-button"><CalendarDays size={15} /> Any date <ChevronDown size={14} /></button></div><section className="card runs-card"><div className="card-heading"><div><h2>All test runs</h2><p>{filtered.length} runs in demo history</p></div><button className="more-button">•••</button></div><RunsTable runs={filtered} openRun={openRun} /></section></motion.div> }
 function RunDetails({ run, back }: { run: Run; back: () => void }) { const cases = run.cases || []; return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page"><button className="back-button" onClick={back}>← Back to test runs</button><PageHeader eyebrow={`RUN / ${run.id}`} title={run.file} description={`${run.created} · Persisted automation run`} action={<StatusBadge status={run.status} />} /><div className="metric-grid compact"><Metric icon={FileSpreadsheet} label="Total cases" value={String(run.total)} trend="Processed" color="violet" /><Metric icon={CheckCircle2} label="Passed" value={String(run.passed)} trend={run.total ? `${Math.round(run.passed / run.total * 100)}% pass rate` : 'No cases'} color="cyan" /><Metric icon={AlertTriangle} label="Failed" value={String(run.failed)} trend="Needs attention" color="orange" /><Metric icon={Clock3} label="Skipped" value={String(run.skipped)} trend={run.duration} color="blue" /></div><section className="card runs-card"><div className="card-heading"><div><h2>Test case results</h2><p>Each case includes artifacts captured for its isolated automation context.</p></div></div><div className="table-wrap"><table><thead><tr><th>Test case</th><th>Username</th><th>Target date</th><th>Project</th><th>Status</th><th>Artifacts</th><th>Message</th></tr></thead><tbody>{cases.map(c => <tr key={`${run.id}-${c.row_number}`}><td><strong>{c.case_id || `Row ${c.row_number}`}</strong></td><td className="mono">{c.username_masked || '—'}</td><td>{c.requested_date || '—'}</td><td>{c.project || '—'}</td><td><span className="badge">{c.status}</span></td><td>{c.artifacts?.length ? c.artifacts.map(artifact => <a key={artifact.kind} className="link-button" href={`${API}${artifact.url}`} target="_blank" rel="noreferrer">{artifact.kind}</a>) : '—'}</td><td>{c.message || '—'}</td></tr>)}</tbody></table></div></section></motion.div> }
 
+type Artifact = {
+  artifactId: string
+  caseId: string
+  caseName?: string
+  status: string
+  readOnly: boolean
+  recordingAvailable: boolean
+  videoUrl: string | null
+  kind?: string
+  appName?: string
+  suiteName?: string
+  createdAt?: string
+  sizeBytes?: number
+  fileName?: string
+}
+
 function Recordings({ open }: { open: (recording?: Artifact) => void }) {
-  const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [browserArtifacts, setBrowserArtifacts] = useState<any[]>([])
+  const [legacyArtifacts, setLegacyArtifacts] = useState<Artifact[]>([])
   const [runs, setRuns] = useState<Run[]>([])
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [filterType, setFilterType] = useState<'all' | 'video' | 'screenshot'>('all')
+  const [selectedApp, setSelectedApp] = useState<string>('all')
+
+  const fetchData = async () => {
+    setLoading(true)
+    try {
+      const [browserResp, legacyResp, runsResp] = await Promise.all([
+        fetch(`${API}/api/browser-tests/all-artifacts`).then(r => r.ok ? r.json() : []).catch(() => []),
+        fetch(`${API}/api/artifacts`).then(r => r.ok ? r.json() : []).catch(() => []),
+        fetch(`${API}/api/runs`).then(r => r.ok ? r.json() : []).catch(() => []),
+      ])
+      setBrowserArtifacts(browserResp)
+      setLegacyArtifacts(legacyResp)
+      setRuns(runsResp)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
-    Promise.all([
-      fetch(`${API}/api/artifacts`),
-      fetch(`${API}/api/runs`),
-    ])
-      .then(([artResp, runResp]) =>
-        Promise.all([
-          artResp.ok ? artResp.json() : [],
-          runResp.ok ? runResp.json() : [],
-        ])
-      )
-      .then(([artData, runData]) => {
-        setArtifacts(artData)
-        setRuns(runData)
-      })
-      .catch(() => {
-        setArtifacts([]); setRuns([])
-      })
+    fetchData()
   }, [])
-  const artifactWithFile = artifacts.map((a) => {
+
+  const normalizedBrowserArtifacts: Artifact[] = browserArtifacts.map((item) => ({
+    artifactId: item.id,
+    caseId: item.case_key || 'Case',
+    caseName: item.case_name || '',
+    status: item.execution_status || 'COMPLETED',
+    readOnly: false,
+    recordingAvailable: item.kind === 'video',
+    videoUrl: `/api/browser-tests/artifacts/${item.id}`,
+    kind: item.kind,
+    appName: item.application_name || 'Workflow Test',
+    suiteName: item.suite_name || '',
+    createdAt: item.created_at,
+    sizeBytes: item.size_bytes ? Number(item.size_bytes) : undefined,
+    fileName: item.suite_name || 'Browser Test',
+  }))
+
+  const normalizedLegacyArtifacts: Artifact[] = legacyArtifacts.map((a) => {
     const run = runs.find((r) => r.cases?.some((c) => c.case_id === a.caseId))
-    return { ...a, fileName: run?.file || '—' }
+    return {
+      ...a,
+      kind: a.videoUrl ? 'video' : 'screenshot',
+      appName: 'Oracle APEX Timesheet',
+      fileName: run?.file || 'Timesheet Automation',
+      createdAt: a.artifactId ? new Date(Number(a.artifactId.split('-')[0]) || Date.now()).toISOString() : undefined,
+    }
   })
+
+  const allArtifacts = [...normalizedBrowserArtifacts, ...normalizedLegacyArtifacts]
+  const videoCount = allArtifacts.filter(a => a.kind === 'video').length
+  const screenshotCount = allArtifacts.filter(a => a.kind === 'screenshot').length
+  const appOptions = Array.from(new Set(allArtifacts.map(a => a.appName).filter(Boolean))) as string[]
+
+  const filtered = allArtifacts.filter((item) => {
+    if (filterType === 'video' && item.kind !== 'video') return false
+    if (filterType === 'screenshot' && item.kind !== 'screenshot') return false
+    if (selectedApp !== 'all' && item.appName !== selectedApp) return false
+    if (search) {
+      const q = search.toLowerCase()
+      const match =
+        (item.caseId && item.caseId.toLowerCase().includes(q)) ||
+        (item.caseName && item.caseName.toLowerCase().includes(q)) ||
+        (item.appName && item.appName.toLowerCase().includes(q)) ||
+        (item.suiteName && item.suiteName.toLowerCase().includes(q)) ||
+        (item.status && item.status.toLowerCase().includes(q))
+      if (!match) return false
+    }
+    return true
+  })
+
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
-      <PageHeader eyebrow="ARTIFACTS" title="Recordings" description="Review Playwright artifacts from read-only login validation." action={<button className="select-button">All recordings <ChevronDown size={14} /></button>} />
-      <div className="info-banner"><CircleHelp size={17} /><span>Real Playwright recordings appear here when the backend is running. Demo placeholders are not presented as real artifacts.</span></div>
-      <div className="recording-grid">
-        {artifactWithFile.length ? (
-          artifactWithFile.map((artifact, i) => (
-            <motion.button whileHover={{ y: -5 }} className="recording-card card" key={artifact.artifactId} onClick={() => open(artifact)}>
-              <div className={`video-thumb thumb-${i % 4}`}>
-                {artifact.recordingAvailable && <div className="play-circle"><Play size={18} fill="currentColor" /></div>}
-                <span>{artifact.recordingAvailable ? 'PLAYWRIGHT RECORDING' : 'NO VIDEO'}</span>
-              </div>
-              <div className="recording-meta">
-                <div><strong>{artifact.caseId}</strong><span>{artifact.status}</span></div>
-                <div className="artifact-file"><FileSpreadsheet size={12} /> {artifact.fileName}</div>
-              </div>
-              <span className="duration">{artifact.readOnly ? 'READ ONLY' : '—'}</span>
-              <div className="recording-user">Artifact {artifact.artifactId.slice(0, 12)}…</div>
-            </motion.button>
-          ))
-        ) : (
-          <div className="empty-recordings card"><Film size={28} /><strong>No backend recordings found</strong><span>Run the backend validation service, then refresh this page.</span></div>
-        )}
+      <PageHeader
+        eyebrow="EXECUTION EVIDENCE & RECORDINGS"
+        title="Test Case Recordings"
+        description="Inspect video recordings and screenshots captured across all automated browser and workflow runs."
+        action={
+          <button className="button button-secondary" onClick={fetchData} disabled={loading} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Activity size={16} /> Refresh
+          </button>
+        }
+      />
+
+      <div className="card toolbar" style={{ padding: '16px 20px', display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', flex: 1, minWidth: 280 }}>
+          <div className="search-field" style={{ minWidth: 260, flex: 1 }}>
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search by test case ID, title, app, or suite..."
+            />
+          </div>
+
+          <div className="filter-tabs" style={{ display: 'flex', gap: 6 }}>
+            <button
+              className={filterType === 'all' ? 'selected' : ''}
+              onClick={() => setFilterType('all')}
+            >
+              All <span className="badge-count">{allArtifacts.length}</span>
+            </button>
+            <button
+              className={filterType === 'video' ? 'selected' : ''}
+              onClick={() => setFilterType('video')}
+            >
+              <Film size={14} style={{ marginRight: 4, verticalAlign: -2 }} /> Videos <span className="badge-count">{videoCount}</span>
+            </button>
+            <button
+              className={filterType === 'screenshot' ? 'selected' : ''}
+              onClick={() => setFilterType('screenshot')}
+            >
+              Screenshots <span className="badge-count">{screenshotCount}</span>
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>App:</span>
+            <select
+              value={selectedApp}
+              onChange={e => setSelectedApp(e.target.value)}
+              style={{ background: '#0a1020', border: '1px solid #1e293b', color: '#e2e8f0', borderRadius: 6, padding: '6px 12px', fontSize: 13 }}
+            >
+              <option value="all">All Applications ({allArtifacts.length})</option>
+              {appOptions.map(app => (
+                <option key={app} value={app}>{app}</option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
+
+      {loading ? (
+        <div className="card" style={{ padding: '60px 20px', textAlign: 'center' }}>
+          <Loader2 size={36} className="spin" style={{ margin: '0 auto 12px', color: '#21d4d8' }} />
+          <div style={{ fontSize: 15, fontWeight: 600 }}>Loading recordings & evidence...</div>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="empty-recordings card" style={{ padding: '60px 20px', textAlign: 'center' }}>
+          <Film size={44} style={{ margin: '0 auto 12px', color: '#64748b' }} />
+          <strong style={{ display: 'block', fontSize: 17, marginBottom: 6 }}>No recordings match your filter</strong>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>Try clearing your search query or selecting a different tab.</span>
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 20 }}>
+          {filtered.map((artifact) => {
+            const isVideo = artifact.kind === 'video'
+            return (
+              <motion.div
+                whileHover={{ y: -4, borderColor: '#38bdf8' }}
+                key={artifact.artifactId}
+                className="card"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                  borderRadius: 12,
+                  border: '1px solid #1e293b',
+                  background: '#0d1326',
+                  transition: 'border-color 0.2s',
+                }}
+              >
+                {/* Media Preview Box */}
+                <div
+                  style={{
+                    position: 'relative',
+                    height: 160,
+                    background: '#070b14',
+                    borderBottom: '1px solid #1e293b',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => open(artifact)}
+                >
+                  {isVideo ? (
+                    <div style={{ textAlign: 'center' }}>
+                      <div
+                        style={{
+                          width: 52,
+                          height: 52,
+                          borderRadius: '50%',
+                          background: 'rgba(33, 212, 216, 0.15)',
+                          border: '2px solid #21d4d8',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          margin: '0 auto 8px',
+                          color: '#21d4d8',
+                        }}
+                      >
+                        <Play size={22} fill="currentColor" style={{ marginLeft: 3 }} />
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', color: '#38bdf8' }}>
+                        PLAY RECORDING
+                      </span>
+                    </div>
+                  ) : (
+                    <img
+                      src={`${API}${artifact.videoUrl}`}
+                      alt={artifact.caseId}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none'
+                      }}
+                    />
+                  )}
+
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 10,
+                      left: 10,
+                      background: 'rgba(8, 12, 24, 0.85)',
+                      padding: '3px 8px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: isVideo ? '#21d4d8' : '#a78bfa',
+                      border: '1px solid #334155',
+                    }}
+                  >
+                    {isVideo ? 'VIDEO (.webm)' : 'SCREENSHOT'}
+                  </div>
+
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 10,
+                      right: 10,
+                    }}
+                  >
+                    <StatusBadge status={artifact.status} />
+                  </div>
+                </div>
+
+                {/* Card Details */}
+                <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, color: '#38bdf8', fontWeight: 600, background: 'rgba(56, 189, 248, 0.1)', padding: '2px 6px', borderRadius: 4 }}>
+                      {artifact.appName}
+                    </span>
+                    <strong style={{ fontSize: 14, color: '#f8fafc' }}>{artifact.caseId}</strong>
+                  </div>
+
+                  <h3 style={{ fontSize: 14, fontWeight: 500, color: '#cbd5e1', lineHeight: 1.4, margin: '0 0 10px 0', minHeight: 38 }}>
+                    {artifact.caseName || artifact.fileName || 'Execution Run Artifact'}
+                  </h3>
+
+                  {artifact.suiteName && (
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      Suite: {artifact.suiteName}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: 11, color: '#64748b' }}>
+                      {artifact.createdAt ? new Date(artifact.createdAt).toLocaleDateString() : '—'}
+                      {artifact.sizeBytes ? ` · ${(artifact.sizeBytes / (1024 * 1024)).toFixed(1)} MB` : ''}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        className="button button-primary"
+                        style={{ padding: '5px 12px', fontSize: 12 }}
+                        onClick={() => open(artifact)}
+                      >
+                        {isVideo ? 'Watch' : 'View'}
+                      </button>
+                      {artifact.videoUrl && (
+                        <a
+                          href={`${API}${artifact.videoUrl}`}
+                          download
+                          className="button button-secondary"
+                          style={{ padding: '5px 10px', fontSize: 12 }}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Save
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )
+          })}
+        </div>
+      )}
     </motion.div>
   )
 }
-type Artifact = { artifactId: string; caseId: string; status: string; readOnly: boolean; recordingAvailable: boolean; videoUrl: string | null }
-function VideoModal({ close, recording }: { close: () => void; recording?: Artifact }) { return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="modal-backdrop" onClick={close}><motion.div initial={{ y: 20 }} animate={{ y: 0 }} className="video-modal card" onClick={e => e.stopPropagation()}><div className="modal-heading"><div><div className="eyebrow">{recording?.readOnly ? 'READ-ONLY RECORDING' : 'DEMO RECORDING'} · {recording?.caseId || '—'}</div><h2>Recording preview</h2></div><button className="icon-button" onClick={close}><X size={18} /></button></div>{recording?.videoUrl ? <video className="real-video" controls autoPlay src={`${API}${recording.videoUrl}`} /> : <div className="video-placeholder"><Film size={42} /><strong>Recording will be available when the Playwright worker is connected.</strong><span>No browser session or real Oracle account was accessed.</span></div>}<div className="timeline"><div><span className="timeline-dot cyan" /><b>Login validation</b><small>Read-only</small></div><div><span className="timeline-dot violet" /><b>Authentication result</b><small>{recording?.status || 'Unavailable'}</small></div><div><span className="timeline-dot orange" /><b>Timesheet changes</b><small>None</small></div></div></motion.div></motion.div> }
+
+function VideoModal({ close, recording }: { close: () => void; recording?: Artifact }) {
+  if (!recording) return null
+  const isVideo = recording.kind === 'video' || recording.videoUrl?.endsWith('.webm') || recording.videoUrl?.endsWith('.mp4') || recording.recordingAvailable
+  const isScreenshot = recording.kind === 'screenshot' || recording.videoUrl?.endsWith('.png') || recording.videoUrl?.endsWith('.jpg')
+  const mediaUrl = recording.videoUrl ? (recording.videoUrl.startsWith('http') ? recording.videoUrl : `${API}${recording.videoUrl}`) : null
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="modal-backdrop" onClick={close}>
+      <motion.div
+        initial={{ y: 20, scale: 0.98 }}
+        animate={{ y: 0, scale: 1 }}
+        className="video-modal card"
+        style={{ maxWidth: 900, width: '92vw', padding: 24, maxHeight: '90vh', overflowY: 'auto' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="modal-heading" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div className="eyebrow" style={{ color: '#21d4d8', fontWeight: 600 }}>
+              {recording.appName || 'ARTIFACT PREVIEW'} · {recording.caseId}
+            </div>
+            <h2 style={{ fontSize: 20, marginTop: 4, color: '#f8fafc' }}>
+              {recording.caseName || recording.fileName || 'Recording Preview'}
+            </h2>
+            <div style={{ display: 'flex', gap: 10, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <StatusBadge status={recording.status} />
+              {recording.suiteName && <span style={{ fontSize: 12, color: '#94a3b8' }}>Suite: {recording.suiteName}</span>}
+              {recording.createdAt && <span style={{ fontSize: 12, color: '#64748b' }}>· {new Date(recording.createdAt).toLocaleString()}</span>}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {mediaUrl && (
+              <a href={mediaUrl} download className="button button-secondary" style={{ padding: '6px 12px', fontSize: 13 }} target="_blank" rel="noreferrer">
+                Download
+              </a>
+            )}
+            <button className="icon-button" onClick={close}><X size={18} /></button>
+          </div>
+        </div>
+
+        <div style={{ background: '#070b14', borderRadius: 10, overflow: 'hidden', border: '1px solid #1e293b', minHeight: 380, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {isVideo && mediaUrl ? (
+            <video controls autoPlay src={mediaUrl} style={{ width: '100%', maxHeight: '68vh', display: 'block' }} />
+          ) : isScreenshot && mediaUrl ? (
+            <img src={mediaUrl} alt={recording.caseId} style={{ maxWidth: '100%', maxHeight: '68vh', objectFit: 'contain' }} />
+          ) : (
+            <div className="video-placeholder" style={{ padding: 40, textAlign: 'center' }}>
+              <Film size={48} color="#64748b" style={{ margin: '0 auto 12px' }} />
+              <strong style={{ display: 'block', fontSize: 16, color: '#e2e8f0' }}>Artifact preview unavailable</strong>
+              <span style={{ color: '#94a3b8', fontSize: 13 }}>The artifact file could not be loaded from the storage backend.</span>
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </motion.div>
+  )
+}
+
 function Reports({ navigate }: { navigate: (p: Page) => void }) {
   const [runs, setRuns] = useState<Run[]>([])
+  const [rangeFilter, setRangeFilter] = useState<'10' | '20' | 'all'>('10')
+
   useEffect(() => {
     fetch(`${API}/api/runs`)
       .then((response) => (response.ok ? response.json() : []))
       .then(setRuns)
       .catch(() => setRuns([]))
   }, [])
+
   const totalCases = runs.reduce((sum, r) => sum + r.total, 0)
   const totalPassed = runs.reduce((sum, r) => sum + r.passed, 0)
   const totalFailed = runs.reduce((sum, r) => sum + r.failed, 0)
   const passRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : 0
-  const chartDataLocal = runs.map((r) => ({
-    name: r.id.slice(-8),
-    passed: r.passed,
-    partial: r.status === 'Partial' ? r.failed : 0,
-    failed: r.status === 'Partial' ? 0 : r.failed,
-  }))
   const partialRunCases = runs.filter((r) => r.status === 'Partial').reduce((s, r) => s + r.failed, 0)
+
+  // Filter runs based on range selection
+  const displayedRuns = rangeFilter === '10' ? runs.slice(-10) : rangeFilter === '20' ? runs.slice(-20) : runs
+
+  const chartDataLocal = displayedRuns.map((r, index) => {
+    const rawName = r.file ? r.file.replace(/\.csv$/i, '') : r.id.slice(-8)
+    const shortLabel = displayedRuns.length > 15 ? `#${index + 1}` : rawName.length > 14 ? rawName.slice(0, 12) + '…' : rawName
+    return {
+      name: shortLabel,
+      fullName: r.file || r.id,
+      id: r.id,
+      passed: r.passed,
+      partial: r.status === 'Partial' ? r.failed : 0,
+      failed: r.status === 'Partial' ? 0 : r.failed,
+      total: r.total,
+    }
+  })
+
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
-      <PageHeader eyebrow="ANALYTICS" title="Reports" description="Reports are generated from persisted automation results." />
+      <PageHeader
+        eyebrow="ANALYTICS & INTELLIGENCE"
+        title="Execution Reports"
+        description="Comprehensive breakdown of automation pass rates, failure patterns, and run distributions."
+      />
+
+      {/* Top 4 Luxury Metric Cards */}
       <div className="metric-grid">
-        <Metric icon={FileSpreadsheet} label="Total runs" value={String(runs.length)} trend="Persisted executions" color="violet" />
-        <Metric icon={CheckCircle2} label="Passed cases" value={String(totalPassed)} trend={totalCases ? `${passRate}% pass rate` : 'No results yet'} color="cyan" />
-        <Metric icon={AlertTriangle} label="Failed cases" value={String(totalFailed)} trend={totalCases ? `${Math.round((totalFailed / totalCases) * 100)}% failure rate` : 'No results yet'} color="orange" />
-        <Metric icon={Clock3} label="Runs" value={String(runs.length)} trend="Total executed" color="blue" />
+        <Metric icon={FileSpreadsheet} label="Total Executions" value={String(runs.length)} trend="Persisted Runs" color="violet" />
+        <Metric icon={CheckCircle2} label="Cases Passed" value={String(totalPassed)} trend={totalCases ? `${passRate}% Pass Rate` : 'No Results'} color="cyan" />
+        <Metric icon={AlertTriangle} label="Cases Failed" value={String(totalFailed)} trend={totalCases ? `${Math.round((totalFailed / totalCases) * 100)}% Failure` : 'No Results'} color="orange" />
+        <Metric icon={Clock3} label="Total Cases Evaluated" value={String(totalCases)} trend="Full Portfolio" color="blue" />
       </div>
-      <section className="card report-chart">
-        <div className="card-heading"><div><h2>Results by run</h2><p>Passed / Partial / Failed breakdown</p></div></div>
-        <div className="chart-wrap">
+
+      {/* Chart 1: Results By Run (Stacked Bar with Gradients & Legend & Filter) */}
+      <section className="card report-chart" style={{ padding: '26px 30px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
+        <div className="card-heading" style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14 }}>
+          <div>
+            <div className="eyebrow" style={{ color: '#21d4d8' }}>EXECUTION SEQUENCE</div>
+            <h2 style={{ fontSize: 20, color: '#f8fafc', marginTop: 4 }}>Results by Run</h2>
+            <p style={{ fontSize: 13, color: '#94a3b8' }}>Case breakdown for each executed automation session</p>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            {/* Custom Glowing Legend */}
+            <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: '#21d4d8' }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#21d4d8', boxShadow: '0 0 8px #21d4d8' }} />
+                <span>Passed</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: '#fbbf24' }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#fbbf24', boxShadow: '0 0 8px #fbbf24' }} />
+                <span>Partial</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, color: '#f43f5e' }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#f43f5e', boxShadow: '0 0 8px #f43f5e' }} />
+                <span>Failed</span>
+              </div>
+            </div>
+
+            {/* Range Toggle Pill Bar */}
+            <div style={{ display: 'flex', background: '#090e1c', padding: 4, borderRadius: 8, border: '1px solid #1e293b' }}>
+              <button
+                style={{
+                  border: 'none',
+                  background: rangeFilter === '10' ? '#17223b' : 'transparent',
+                  color: rangeFilter === '10' ? '#21d4d8' : '#94a3b8',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: '5px 12px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                }}
+                onClick={() => setRangeFilter('10')}
+              >
+                Last 10
+              </button>
+              <button
+                style={{
+                  border: 'none',
+                  background: rangeFilter === '20' ? '#17223b' : 'transparent',
+                  color: rangeFilter === '20' ? '#21d4d8' : '#94a3b8',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: '5px 12px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                }}
+                onClick={() => setRangeFilter('20')}
+              >
+                Last 20
+              </button>
+              <button
+                style={{
+                  border: 'none',
+                  background: rangeFilter === 'all' ? '#17223b' : 'transparent',
+                  color: rangeFilter === 'all' ? '#21d4d8' : '#94a3b8',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: '5px 12px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                }}
+                onClick={() => setRangeFilter('all')}
+              >
+                All Runs ({runs.length})
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="chart-wrap" style={{ height: 320 }}>
           {runs.length ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={chartDataLocal}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="passed" fill="#22c55e" radius={[4, 4, 0, 0]} stackId="a" />
-                <Bar dataKey="partial" fill="#f59e0b" radius={[4, 4, 0, 0]} stackId="a" />
-                <Bar dataKey="failed" fill="#ef4444" radius={[4, 4, 0, 0]} stackId="a" />
+            <ResponsiveContainer width="100%" height={320}>
+              <BarChart data={chartDataLocal} margin={{ top: 12, right: 12, left: -16, bottom: 20 }}>
+                <defs>
+                  <linearGradient id="passed-bar-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#21d4d8" />
+                    <stop offset="100%" stopColor="#059669" />
+                  </linearGradient>
+                  <linearGradient id="partial-bar-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#fbbf24" />
+                    <stop offset="100%" stopColor="#d97706" />
+                  </linearGradient>
+                  <linearGradient id="failed-bar-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f43f5e" />
+                    <stop offset="100%" stopColor="#be123c" />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
+                <XAxis
+                  dataKey="name"
+                  tick={{ fontSize: 12, fill: '#94a3b8' }}
+                  axisLine={{ stroke: '#1e293b' }}
+                  tickLine={false}
+                  dy={8}
+                />
+                <YAxis
+                  tick={{ fontSize: 12, fill: '#94a3b8' }}
+                  axisLine={{ stroke: '#1e293b' }}
+                  tickLine={false}
+                  allowDecimals={false}
+                />
+                <Tooltip
+                  content={({ active, payload, label }) => {
+                    if (active && payload && payload.length) {
+                      const data = payload[0].payload
+                      return (
+                        <div style={{ background: '#0a1020', border: '1px solid #1e293b', borderRadius: 10, padding: '12px 16px', boxShadow: '0 10px 30px rgba(0,0,0,0.6)', minWidth: 210 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: '#f8fafc', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {data.fullName || `Run ${label}`}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#21d4d8' }}>
+                              <span>Passed:</span>
+                              <strong>{data.passed} cases</strong>
+                            </div>
+                            {data.partial > 0 && (
+                              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#fbbf24' }}>
+                                <span>Partial:</span>
+                                <strong>{data.partial} cases</strong>
+                              </div>
+                            )}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#f43f5e' }}>
+                              <span>Failed:</span>
+                              <strong>{data.failed} cases</strong>
+                            </div>
+                            <div style={{ borderTop: '1px solid #1e293b', paddingTop: 6, marginTop: 4, display: 'flex', justifyContent: 'space-between', color: '#f8fafc', fontWeight: 700 }}>
+                              <span>Total Cases:</span>
+                              <span>{data.total}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    }
+                    return null
+                  }}
+                />
+                <Bar dataKey="passed" fill="url(#passed-bar-grad)" stackId="a" maxBarSize={38} />
+                <Bar dataKey="partial" fill="url(#partial-bar-grad)" stackId="a" maxBarSize={38} />
+                <Bar dataKey="failed" fill="url(#failed-bar-grad)" stackId="a" radius={[6, 6, 0, 0]} maxBarSize={38} />
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div className="empty-recordings"><BarChart3 size={28} /><strong>No report data yet</strong><span>Process a CSV to populate reports from PostgreSQL.</span></div>
+            <div className="empty-recordings" style={{ padding: '60px 20px', textAlign: 'center' }}>
+              <BarChart3 size={32} style={{ color: '#64748b', margin: '0 auto 10px' }} />
+              <strong style={{ display: 'block', fontSize: 16 }}>No report data yet</strong>
+              <span style={{ fontSize: 13, color: '#94a3b8' }}>Process a CSV or run browser test suites to populate analytics.</span>
+            </div>
           )}
         </div>
       </section>
-      <section className="card report-chart">
-        <div className="card-heading"><div><h2>Overall distribution</h2><p>Case outcomes across all runs</p></div></div>
-        <div className="chart-wrap">
-          {totalCases > 0 ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <PieChart>
-                <Pie data={[{ name: 'Passed', value: totalPassed }, { name: 'Partial', value: partialRunCases }, { name: 'Failed', value: Math.max(0, totalFailed - partialRunCases) }]} cx="50%" cy="50%" innerRadius={60} outerRadius={80} fill="#8884d8" dataKey="value">
-                  <Cell fill="#22c55e" /><Cell fill="#f59e0b" /><Cell fill="#ef4444" />
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="empty-recordings"><BarChart3 size={28} /><strong>No report data yet</strong><span>Process a CSV to populate reports from PostgreSQL.</span></div>
-          )}
+
+      {/* Chart 2: Overall Distribution (Luxury Donut with Center HUD + 3 Breakdown Cards) */}
+      <section className="card report-chart" style={{ padding: '26px 30px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
+        <div className="card-heading" style={{ marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div className="eyebrow" style={{ color: '#c4b5fd' }}>PORTFOLIO BREAKDOWN</div>
+            <h2 style={{ fontSize: 20, color: '#f8fafc', marginTop: 4 }}>Overall Outcome Distribution</h2>
+            <p style={{ fontSize: 13, color: '#94a3b8' }}>Cumulative case outcomes across all persisted execution sessions</p>
+          </div>
+          <div style={{ background: '#090e1c', border: '1px solid #1e293b', borderRadius: 8, padding: '7px 16px', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: '#94a3b8' }}>Total Processed:</span>
+            <strong style={{ fontSize: 14, color: '#f8fafc' }}>{totalCases} Cases</strong>
+          </div>
         </div>
+
+        {totalCases > 0 ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1fr) minmax(360px, 1.4fr)', gap: 36, alignItems: 'center' }}>
+            {/* Left: Donut with Center HUD */}
+            <div style={{ position: 'relative', height: 280, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <ResponsiveContainer width="100%" height={280}>
+                <PieChart>
+                  <defs>
+                    <linearGradient id="donut-passed-grad" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stopColor="#21d4d8" />
+                      <stop offset="100%" stopColor="#10b981" />
+                    </linearGradient>
+                    <linearGradient id="donut-partial-grad" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stopColor="#fbbf24" />
+                      <stop offset="100%" stopColor="#f59e0b" />
+                    </linearGradient>
+                    <linearGradient id="donut-failed-grad" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stopColor="#f43f5e" />
+                      <stop offset="100%" stopColor="#e11d48" />
+                    </linearGradient>
+                  </defs>
+                  <Pie
+                    data={[
+                      { name: 'Passed', value: totalPassed },
+                      { name: 'Partial', value: partialRunCases },
+                      { name: 'Failed', value: Math.max(0, totalFailed - partialRunCases) },
+                    ]}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={82}
+                    outerRadius={114}
+                    paddingAngle={4}
+                    cornerRadius={6}
+                    dataKey="value"
+                  >
+                    <Cell fill="url(#donut-passed-grad)" stroke="#0e1528" strokeWidth={3} />
+                    <Cell fill="url(#donut-partial-grad)" stroke="#0e1528" strokeWidth={3} />
+                    <Cell fill="url(#donut-failed-grad)" stroke="#0e1528" strokeWidth={3} />
+                  </Pie>
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (active && payload && payload[0]) {
+                        const item = payload[0]
+                        const pct = totalCases > 0 ? Math.round((Number(item.value) / totalCases) * 100) : 0
+                        return (
+                          <div style={{ background: '#0a1020', border: '1px solid #1e293b', borderRadius: 8, padding: '10px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
+                            <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 13 }}>{item.name} Cases</div>
+                            <div style={{ color: '#21d4d8', fontSize: 14, fontWeight: 800, marginTop: 2 }}>{item.value} ({pct}%)</div>
+                          </div>
+                        )
+                      }
+                      return null
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+
+              {/* Center HUD */}
+              <div style={{ position: 'absolute', textAlign: 'center', pointerEvents: 'none' }}>
+                <div style={{ fontSize: 36, fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.02em', lineHeight: 1 }}>
+                  {passRate}%
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', color: '#21d4d8', textTransform: 'uppercase', marginTop: 5 }}>
+                  Pass Rate
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Rich KPI Outcome Cards */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Passed Outcome Card */}
+              <div style={{ background: '#090e1c', border: '1px solid rgba(33, 212, 216, 0.25)', borderRadius: 10, padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <div style={{ width: 14, height: 14, borderRadius: '50%', background: '#21d4d8', boxShadow: '0 0 10px #21d4d8' }} />
+                  <div>
+                    <strong style={{ fontSize: 15, color: '#f8fafc', display: 'block' }}>Passed Cases</strong>
+                    <small style={{ fontSize: 12, color: '#94a3b8' }}>Successfully completed without errors</small>
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: 20, fontWeight: 800, color: '#21d4d8', display: 'block' }}>{totalPassed}</span>
+                  <small style={{ fontSize: 12, color: '#64748b' }}>{totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : 0}% of portfolio</small>
+                </div>
+              </div>
+
+              {/* Partial Outcome Card */}
+              {partialRunCases > 0 && (
+                <div style={{ background: '#090e1c', border: '1px solid rgba(251, 191, 36, 0.25)', borderRadius: 10, padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    <div style={{ width: 14, height: 14, borderRadius: '50%', background: '#fbbf24', boxShadow: '0 0 10px #fbbf24' }} />
+                    <div>
+                      <strong style={{ fontSize: 15, color: '#f8fafc', display: 'block' }}>Partial Execution</strong>
+                      <small style={{ fontSize: 12, color: '#94a3b8' }}>Completed with warnings or skips</small>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: 20, fontWeight: 800, color: '#fbbf24', display: 'block' }}>{partialRunCases}</span>
+                    <small style={{ fontSize: 12, color: '#64748b' }}>{totalCases > 0 ? Math.round((partialRunCases / totalCases) * 100) : 0}% of portfolio</small>
+                  </div>
+                </div>
+              )}
+
+              {/* Failed Outcome Card */}
+              <div style={{ background: '#090e1c', border: '1px solid rgba(244, 63, 94, 0.25)', borderRadius: 10, padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <div style={{ width: 14, height: 14, borderRadius: '50%', background: '#f43f5e', boxShadow: '0 0 10px #f43f5e' }} />
+                  <div>
+                    <strong style={{ fontSize: 15, color: '#f8fafc', display: 'block' }}>Failed Cases</strong>
+                    <small style={{ fontSize: 12, color: '#94a3b8' }}>Encountered assertion or locator failure</small>
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: 20, fontWeight: 800, color: '#f43f5e', display: 'block' }}>{Math.max(0, totalFailed - partialRunCases)}</span>
+                  <small style={{ fontSize: 12, color: '#64748b' }}>{totalCases > 0 ? Math.round((Math.max(0, totalFailed - partialRunCases) / totalCases) * 100) : 0}% of portfolio</small>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-recordings" style={{ padding: '60px 20px', textAlign: 'center' }}>
+            <BarChart3 size={32} style={{ color: '#64748b', margin: '0 auto 10px' }} />
+            <strong style={{ display: 'block', fontSize: 16 }}>No distribution data yet</strong>
+            <span style={{ fontSize: 13, color: '#94a3b8' }}>Execute test cases to view outcome proportions.</span>
+          </div>
+        )}
       </section>
-      <section className="card runs-card">
-        <div className="card-heading"><div><h2>Recent runs</h2><p>Last 10 executed test runs</p></div><button className="text-button" onClick={() => navigate('runs')}>View all <ArrowUpRight size={14} /></button></div>
+
+      {/* Recent Runs Table */}
+      <section className="card runs-card" style={{ padding: '24px 28px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
+        <div className="card-heading" style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div className="eyebrow">DETAILED AUDIT</div>
+            <h2 style={{ fontSize: 20, marginTop: 4, color: '#f8fafc' }}>Recent Executions Log</h2>
+            <p style={{ fontSize: 13, color: '#94a3b8' }}>Latest executed runs and case outcomes</p>
+          </div>
+          <button className="button button-secondary" onClick={() => navigate('runs')} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>View All Runs</span>
+            <ArrowUpRight size={14} />
+          </button>
+        </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Run ID</th><th>CSV filename</th><th>Cases</th><th>Passed</th><th>Failed</th><th>Status</th></tr></thead>
-            <tbody>{runs.slice(0, 10).map((r) => (<tr key={r.id}><td className="mono">{r.id.slice(-12)}</td><td>{r.file}</td><td>{r.total}</td><td className="success-text">{r.passed}</td><td className="danger-text">{r.failed}</td><td><StatusBadge status={r.status} /></td></tr>))}</tbody>
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>CSV Filename</th>
+                <th>Cases</th>
+                <th>Passed</th>
+                <th>Failed</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.slice(0, 10).map((r) => (
+                <tr key={r.id}>
+                  <td className="mono">{r.id.slice(-12)}</td>
+                  <td>{r.file}</td>
+                  <td>{r.total}</td>
+                  <td className="success-text" style={{ color: '#21d4d8', fontWeight: 600 }}>{r.passed}</td>
+                  <td className="danger-text" style={{ color: '#f43f5e', fontWeight: 600 }}>{r.failed}</td>
+                  <td><StatusBadge status={r.status} /></td>
+                </tr>
+              ))}
+            </tbody>
           </table>
         </div>
       </section>
     </motion.div>
   )
 }
+
 function SettingsPage() { return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page"><PageHeader eyebrow="CONFIGURATION" title="Settings" description="Manage demo preferences. Credentials are not stored in workflow definitions." /><div className="settings-grid"><section className="card settings-section"><h2>General</h2><p>Customize how Chronos looks and behaves.</p><label>Product name<input defaultValue="Chronos" /></label><label>Default date range<select><option>Last 7 days</option><option>Last 30 days</option></select></label><label>Theme preference<select><option>Dark (current)</option></select></label></section><section className="card settings-section"><h2>Automation preferences</h2><p>Defaults for simulated runs.</p><label>Default browser<select><option>Chromium</option></select></label><label>Recording preference<select><option>Capture when enabled</option><option>Always off</option></select></label><label>Retry count<select><option>2 retries</option><option>1 retry</option></select></label></section><section className="card settings-section"><h2>Oracle application</h2><p>Connection is reserved for a future backend.</p><label>Demo application URL<input defaultValue="https://demo.oracle-app.invalid" /></label><div className="connection-status"><span className="status-circle" />Not connected</div><div className="security-note"><ShieldCheck size={15} /> Credentials and authentication will be handled securely by the backend.</div></section><section className="card settings-section"><h2>Security &amp; data</h2><p>Your local preview remains in memory only.</p><div className="security-list"><div><ShieldCheck size={16} /><span><strong>Credentials are not stored in workflow definitions</strong><small>Choose the recording policy carefully; show-all recordings contain typed passwords.</small></span></div><div><FileSpreadsheet size={16} /><span><strong>Local file retention</strong><small>Clearing the workflow removes raw CSV data.</small></span></div></div><button className="button button-danger">Clear demo data</button></section></div></motion.div> }
 
 type HcmInspectionApp = { id: string; name: string; base_url: string; auth_method: string; status: string }
@@ -1916,6 +2831,7 @@ const browserTestCsvTemplate = 'test_case_id,name,preconditions,steps,test_data,
   'TC001,Inspect login page,[],"Navigate to /login; Verify that the Sign In heading is visible",{},"Assert that the Sign In heading is visible",High,smoke\n'
 
 function BrowserTestsPage() {
+  const [activeTab, setActiveTab] = useState<'execution' | 'import' | 'docs'>('execution')
   const [applications, setApplications] = useState<BrowserTestApp[]>([])
   const [suites, setSuites] = useState<BrowserTestSuite[]>([])
   const [executions, setExecutions] = useState<BrowserTestExecution[]>([])
@@ -2138,68 +3054,657 @@ function BrowserTestsPage() {
   const approvalHasWrites = approvalActions.some((action) => action.requiresWriteApproval)
   const approvalHasDelete = approvalActions.some((action) => action.action === 'delete')
 
-  return <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page browser-tests-page">
-    <PageHeader eyebrow="RULE-BASED BROWSER TESTS" title="Test suites" description="Import deterministic CSV cases, review validated action plans, then run them against registered applications." />
-    {message && <div className="info-banner browser-test-message"><Info size={16} /><span>{message}</span></div>}
-    <section className="card browser-test-import">
-      <div className="card-heading"><div><div className="eyebrow">CSV IMPORT</div><h2>Preview and import cases</h2><p>Quoted commas, escaped quotes, and multiline fields are supported. Passwords and tokens are rejected.</p></div></div>
-      <div className="browser-test-import-controls">
-        <label>Registered application<select value={applicationId} onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}><option value="">Choose an application</option>{applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}</select></label>
-        <label>Suite name<input value={suiteName} onChange={(event) => setSuiteName(event.target.value)} placeholder="Smoke tests" /></label>
-        <label className="browser-test-file">CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => previewFile(event.currentTarget.files?.[0])} /></label>
-        {workflowTemplate ? <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(workflowTemplate.csv_template)}`} download="chronos-recorded-workflow-template.csv">Download {workflowTemplate.workflow_name} CSV</a> : <a className="button button-secondary" href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`} download="chronos-browser-tests-template.csv">Download CSV template</a>}
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page browser-tests-page">
+      <PageHeader
+        eyebrow="WORKFLOW AUTOMATION"
+        title="Workflow Tests"
+        description="Execute deterministic workflow test cases, watch live browser execution, and inspect step-by-step results."
+      />
+
+      {message && (
+        <div className="info-banner browser-test-message">
+          <Info size={18} />
+          <span>{message}</span>
+        </div>
+      )}
+
+      {/* Primary Navigation Tabs */}
+      <div className="workflow-tabs">
+        <button
+          className={`workflow-tab-btn ${activeTab === 'execution' ? 'active' : ''}`}
+          onClick={() => setActiveTab('execution')}
+        >
+          <Play size={16} /> Test Suites & Execution {cases.length > 0 ? `(${cases.length})` : ''}
+        </button>
+        <button
+          className={`workflow-tab-btn ${activeTab === 'import' ? 'active' : ''}`}
+          onClick={() => setActiveTab('import')}
+        >
+          <Upload size={16} /> Import CSV Cases
+        </button>
+        <button
+          className={`workflow-tab-btn ${activeTab === 'docs' ? 'active' : ''}`}
+          onClick={() => setActiveTab('docs')}
+        >
+          <FileSpreadsheet size={16} /> Rule Syntax & Help
+        </button>
       </div>
-      {workflowVersions.length > 0 && <label>Saved workflow version<select value={workflowTemplate?.workflow_version || ''} onChange={(event) => loadWorkflowVersion(Number(event.target.value))}>{workflowVersions.map((version) => <option key={version.workflow_version} value={version.workflow_version}>v{version.workflow_version} · {version.workflow_name} · {new Date(version.created_at).toLocaleDateString()}</option>)}</select></label>}
-      {workflowTemplate && <div className="browser-test-help"><strong>Recorded workflow v{workflowTemplate.workflow_version}:</strong> {workflowTemplate.workflow_name}. Captured actions: {workflowTemplate.action_plan.map((action) => action.action).join(' → ')}. CSV fields: {workflowTemplate.data_fields.map((field) => field.key).join(', ') || 'none'}. Edit the generated data values and expected result before importing test cases.</div>}
-      {workflowTemplate && <label className="browser-test-template-editor">Edit the recorded CSV template<textarea value={workflowCsvDraft} onChange={(event) => setWorkflowCsvDraft(event.target.value)} rows={7} spellCheck={false} /><button className="button button-secondary" disabled={busy || !applicationId} onClick={() => previewCsvText(workflowCsvDraft, 'recorded-workflow.csv')}>Preview edited template</button></label>}
-      <div className="browser-test-help"><strong>Required columns:</strong> test_case_id, name, preconditions, steps, test_data, expected_result, priority. <strong>Optional:</strong> tags. Preconditions and test_data use JSON. Steps use the documented rule syntax below.</div>
-      <div className="browser-test-import-controls">
-        <label>Default timeout (seconds)<select value={runOptions.defaultTimeoutMs / 1000} onChange={(event) => setRunOptions((current) => ({ ...current, defaultTimeoutMs: Number(event.target.value) * 1000 }))}><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={20}>20 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label>
-        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.recordVideo} onChange={(event) => setRunOptions((current) => ({ ...current, recordVideo: event.target.checked }))} /> Record video</label>
-      <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.reuseAuthenticatedSession} onChange={(event) => setRunOptions((current) => ({ ...current, reuseAuthenticatedSession: event.target.checked }))} /> Reuse manually approved login for this app for 15 minutes</label>
-      <label className="browser-test-approve-check">Recording policy <select value={runOptions.recordingPolicy} onChange={(event) => setRunOptions((current) => ({ ...current, recordingPolicy: event.target.value }))}><option value="show-all-values">Show all values</option><option value="show-non-password-values">Show non-password values</option><option value="mask-form-values">Mask form values</option><option value="disabled">Disable recording for sensitive workflows</option></select></label>
-      <p className="browser-test-subtitle">“Show all values” includes passwords as plain text in saved recordings and failure screenshots. Keep those files private or choose a masking option.</p>
-        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.captureScreenshotsOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, captureScreenshotsOnFailure: event.target.checked }))} /> Screenshots on failure</label>
-        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.stopOnFailure} onChange={(event) => setRunOptions((current) => ({ ...current, stopOnFailure: event.target.checked }))} /> Stop on first failure</label>
-        <label className="browser-test-approve-check"><input type="checkbox" checked={runOptions.headed} onChange={(event) => setRunOptions((current) => ({ ...current, headed: event.target.checked }))} /> Show browser window</label>
-      </div>
-      {preview.length > 0 && <><div className="browser-test-preview-title"><strong>{fileName}</strong><span>{preview.length} cases · {previewErrors.length ? previewErrors.length + ' validation errors' : 'all rows valid'}</span></div>
-        <div className="table-wrap"><table><thead><tr><th>Select</th><th>Row / ID</th><th>Case</th><th>Priority</th><th>Data keys</th><th>Plan actions</th><th>Validation</th></tr></thead><tbody>{preview.map((row) => <tr key={row.rowNumber}><td><input type="checkbox" aria-label={'Select CSV row ' + row.rowNumber} disabled={row.errors.length > 0} checked={selectedPreviewIds.includes(row.testCaseId)} onChange={(event) => setSelectedPreviewIds((current) => event.target.checked ? [...current, row.testCaseId] : current.filter((id) => id !== row.testCaseId))} /></td><td>{row.rowNumber} · {row.testCaseId}</td><td>{row.name}</td><td>{row.priority}</td><td>{row.testDataKeys.join(', ') || '—'}</td><td>{row.stepCount}</td><td>{row.errors.length ? row.errors.join('; ') : 'Valid'}</td></tr>)}</tbody></table></div>
-        {previewIsValid && <button className="button button-primary" disabled={busy} onClick={importSuite}>{busy ? 'Importing…' : `Import ${selectedPreviewIds.length} selected valid cases`}</button>}
-      </>}
-      {previewErrors.length > 0 && <ul className="browser-test-errors">{previewErrors.slice(0, 20).map((error, index) => <li key={index}>{error}</li>)}</ul>}
-    </section>
 
-    <div className="browser-test-columns">
-      <section className="card browser-test-suites"><div className="card-heading"><div><div className="eyebrow">PERSISTED SUITES</div><h2>Imported suites</h2></div><button className="button button-secondary" onClick={() => refresh().catch((error) => setMessage(error.message))}>Refresh</button></div>
-        {suites.length === 0 ? <div className="empty-recordings"><FileSpreadsheet size={28} /><strong>No browser-test suites yet</strong><span>Preview a CSV to create the first suite.</span></div> : <div className="browser-test-suite-list">{suites.map((suite) => <button key={suite.id} className={'browser-test-suite' + (suiteId === suite.id ? ' selected' : '')} onClick={() => chooseSuite(suite.id).catch((error) => setMessage(error.message))}><span><strong>{suite.name}</strong><small>{suite.application_name} · {suite.case_count} cases</small></span><ChevronRight size={16} /></button>)}</div>}
-      </section>
-      <section className="card browser-test-history"><div className="card-heading"><div><div className="eyebrow">EXECUTION HISTORY</div><h2>Recent browser runs</h2></div></div>
-        {executions.length === 0 ? <div className="empty-recordings"><Activity size={28} /><strong>No browser executions</strong><span>Results will persist here after a test runs.</span></div> : <div className="browser-test-run-list">{executions.slice(0, 30).map((run) => <button key={run.id} className="browser-test-run" onClick={() => loadExecution(run.id).catch((error) => setMessage(error.message))}><span><strong>{run.case_key} · {run.case_name}</strong><small>{run.application_name} · {run.created_at ? new Date(run.created_at).toLocaleString() : ''}</small></span><StatusBadge status={run.status} /></button>)}</div>}
-      </section>
-    </div>
+      {/* TAB 1: TEST SUITES & EXECUTION */}
+      {activeTab === 'execution' && (
+        <div className="workflow-tab-content">
+          {/* Controls Bar */}
+          <section className="card" style={{ padding: '20px 24px' }}>
+            <div className="card-heading" style={{ marginBottom: 16 }}>
+              <div>
+                <div className="eyebrow">SUITE & EXECUTION CONTROLS</div>
+                <h2>Execution Setup</h2>
+              </div>
+              <button className="button button-secondary" onClick={() => refresh().catch((error) => setMessage(error.message))}>
+                Refresh Suites
+              </button>
+            </div>
 
-    {cases.length > 0 && <section className="card browser-test-cases"><div className="card-heading"><div><div className="eyebrow">VALIDATED ACTION PLANS</div><h2>Test cases</h2><p>Interactive steps require a separate approval for each run. Requests remain limited by the application security policy.</p></div><button className="button button-primary" disabled={busy || selectedCaseIds.length === 0} onClick={() => runSelectedCases().catch((error) => setMessage(error.message))}>Run selected ({selectedCaseIds.length})</button></div>
-      <div className="table-wrap"><table><thead><tr><th><input aria-label="Select all test cases" type="checkbox" checked={cases.length > 0 && selectedCaseIds.length === cases.length} onChange={(event) => setSelectedCaseIds(event.target.checked ? cases.map((item) => item.id) : [])} /></th><th>ID / case</th><th>Priority / tags</th><th>Plan</th><th>Expected assertions</th><th>Recording</th><th>Action</th></tr></thead><tbody>{cases.map((item) => { const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval); const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status)); return <tr key={item.id}><td><input aria-label={'Select ' + item.case_key} type="checkbox" disabled={active} checked={selectedCaseIds.includes(item.id)} onChange={(event) => setSelectedCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></td><td><strong>{item.case_key}</strong><small className="browser-test-subtitle">{item.name}</small></td><td>{item.priority}<small className="browser-test-subtitle">{(item.tags || []).join(', ')}</small></td><td><ol className="browser-test-plan">{item.plan.actions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}</li>)}</ol></td><td>{item.expected_result}</td><td><label><input aria-label={'Disable recording for ' + item.case_key} type="checkbox" checked={recordingDisabledCaseIds.includes(item.id)} onChange={(event) => setRecordingDisabledCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /> Disable for this case</label></td><td><button className="button button-primary" disabled={busy || active} onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}>{active ? 'Running…' : needsApproval ? 'Review & approve' : 'Run test'}</button></td></tr> })}</tbody></table></div>
-    </section>}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 18 }}>
+              <div className="form-group">
+                <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8' }}>Target Application</label>
+                <select
+                  style={{ padding: '10px 14px', fontSize: 14, borderRadius: 8, background: '#111827', border: '1px solid #1f2937', color: '#f8fafc' }}
+                  value={applicationId}
+                  onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}
+                >
+                  <option value="">Choose an application</option>
+                  {applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}
+                </select>
+              </div>
 
-    {selectedExecution && <section className="card browser-test-execution-detail"><div className="card-heading"><div><div className="eyebrow">EXECUTION DETAIL · {selectedExecution.id}</div><h2>{selectedExecution.case_key} · {selectedExecution.case_name}</h2><p>{selectedExecution.actual_outcome || selectedExecution.error_details || 'Execution is in progress.'}</p></div><StatusBadge status={selectedExecution.status} />{['QUEUED', 'RUNNING'].includes(selectedExecution.status) && <button className="button button-secondary" onClick={() => cancelExecution().catch((error) => setMessage(error.message))}>Cancel run</button>}</div>
-      {waitingForLogin && <div className="browser-test-auth-prompt"><strong>Manual login is open in the isolated browser window.</strong><span>Complete the login there, then resume the test. Credentials are not captured in screenshots or recordings.</span><button className="button button-primary" onClick={resumeLogin}>Resume after manual login</button></div>}
-      {selectedExecution.error_code && <div className="exploration-warning-box">{selectedExecution.error_code}: {selectedExecution.error_details}</div>}
-      <p className="browser-test-subtitle">Recording: {selectedExecution.video_status || 'status unavailable'}{selectedExecution.video_error ? ' · ' + selectedExecution.video_error : ''}</p>
-      {selectedExecution.policy_warnings?.length ? <div className="exploration-warning-box">Policy warnings: {selectedExecution.policy_warnings.map((item) => item.reasonCode + (item.hostname ? ' · ' + item.hostname : '')).join('; ')}</div> : null}
-      {!!selectedExecution.diagnostics?.length && <details className="browser-test-diagnostics"><summary>Sanitized browser and network diagnostics ({selectedExecution.diagnostics.length})</summary><ul>{selectedExecution.diagnostics.map((item, index) => <li key={index}>{[item.type, item.reasonCode, item.stage, item.blockingComponent || item.failureSource || item.responseSource, item.isMainFrameNavigation === undefined ? null : item.isMainFrameNavigation ? 'main document' : 'subresource', item.hostname, item.method, item.origin && item.path ? item.origin + item.path : null, item.status ? 'HTTP ' + item.status : null, item.resourceType, item.message || item.error, item.reason].filter(Boolean).join(' · ')}</li>)}</ul></details>}
-      {!!selectedExecution.steps?.length && <div className="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Expected</th><th>Actual / error</th></tr></thead><tbody>{selectedExecution.steps.map((step) => <tr key={step.id}><td>{step.step_number}</td><td>{step.action}</td><td>{step.status}</td><td>{JSON.stringify(step.expected)}</td><td>{step.error_details || JSON.stringify(step.actual)}</td></tr>)}</tbody></table></div>}
-      <div className="browser-test-artifacts"><a className="button button-secondary" href={API + '/api/browser-tests/executions/' + selectedExecution.id + '/report'} download>Download report</a>{selectedExecution.artifacts?.map((artifact) => <a key={artifact.id} className="button button-secondary" href={API + '/api/browser-tests/artifacts/' + artifact.id} target="_blank" rel="noreferrer">{artifact.kind === 'screenshot' ? 'View screenshot' : artifact.kind === 'video' ? 'View recording' : 'Download trace'}</a>)}</div>
-    </section>}
+              <div className="form-group">
+                <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8' }}>Test Suite</label>
+                <select
+                  style={{ padding: '10px 14px', fontSize: 14, borderRadius: 8, background: '#111827', border: '1px solid #1f2937', color: '#f8fafc' }}
+                  value={suiteId}
+                  onChange={(event) => chooseSuite(event.target.value).catch((error) => setMessage(error.message))}
+                >
+                  <option value="">Select a test suite...</option>
+                  {suites.map((suite) => (
+                    <option key={suite.id} value={suite.id}>
+                      {suite.name} ({suite.case_count} cases) · {suite.application_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
-    <section className="card browser-test-reference"><div className="card-heading"><div><div className="eyebrow">SUPPORTED RULE SYNTAX · PLAN VERSION 1.0</div><h2>Deterministic action templates</h2></div></div>
-      <pre>{'navigate: /path\nclick role=button[name="Continue"]\nfill label="Email" <- ${test_data.email}\nselect label="Country" <- ${test_data.country}\ncheck label="Accept terms"\nuncheck label="Subscribe"\ncreate role=button[name="Create"]\nupdate role=button[name="Save"]\ndelete role=button[name="Delete"]\nwait visible text="Ready" timeout=5000\nread text="Result" as result\nassert visible role=heading[name="Dashboard"]\nassert text text="Status" contains "Complete"\nassert url contains "/home"'}</pre>
-      <p>Create, update, and delete require per-run approval, a same-origin POST form, and a following assertion. Deletes require explicit confirmation. Other methods and unscoped requests remain blocked.</p>
-    </section>
+            {/* Run Options Switches */}
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #1e293b', display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center' }}>
+              <label className="browser-test-approve-check" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#f1f5f9', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 17, height: 17, accentColor: '#21d4d8' }}
+                  checked={runOptions.headed}
+                  onChange={(event) => setRunOptions((current) => ({ ...current, headed: event.target.checked }))}
+                />
+                <strong>Show browser window (live Chrome automation)</strong>
+              </label>
 
-    {approvalCase && <div className="modal-backdrop browser-test-approval-backdrop"><section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test"><div className="modal-heading"><div><div className="eyebrow">RUN APPROVAL</div><h2>{approvalCase.case_key} · {approvalCase.name}</h2></div><button className="icon-button" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}><X size={18} /></button></div><p>{approvalHasWrites ? 'This run includes application writes. Review each operation and explicitly enable writes for this run. Requests are limited to the registered application origin and the exact captured POST form path; the workflow must assert the result after each write.' : 'This plan clicks or changes form controls. Review the steps and approve this single run. Unreviewed POST requests and all other non-GET/HEAD requests remain blocked.'}</p><ol className="browser-test-plan">{approvalActions.map((action, index) => <li key={index}>{action.action}{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · deletes a record' : ''}</li>)}</ol><label className="browser-test-approve-check"><input type="checkbox" checked={approvalChecked} onChange={(event) => setApprovalChecked(event.target.checked)} /> {approvalHasDelete ? 'Enable writes and explicitly authorize the listed deletion for this run.' : approvalHasWrites ? 'Enable writes and authorize the listed create/update actions for this run.' : 'I approve the interactive steps in this test run.'}</label><div className="browser-test-approval-actions"><button className="button button-secondary" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>Cancel</button><button className="button button-primary" disabled={!approvalChecked || busy} onClick={approveQueuedCase}>Approve and run once{queuedCases.length ? ' · ' + queuedCases.length + ' queued after' : ''}</button></div></section></div>}
-  </motion.div>
+              <label className="browser-test-approve-check" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#f1f5f9', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 17, height: 17, accentColor: '#21d4d8' }}
+                  checked={runOptions.recordVideo}
+                  onChange={(event) => setRunOptions((current) => ({ ...current, recordVideo: event.target.checked }))}
+                />
+                <span>Record video</span>
+              </label>
+
+              <label className="browser-test-approve-check" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#f1f5f9', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 17, height: 17, accentColor: '#21d4d8' }}
+                  checked={runOptions.stopOnFailure}
+                  onChange={(event) => setRunOptions((current) => ({ ...current, stopOnFailure: event.target.checked }))}
+                />
+                <span>Stop on first failure</span>
+              </label>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+                <span style={{ fontSize: 13, color: '#94a3b8' }}>Timeout:</span>
+                <select
+                  style={{ padding: '6px 12px', fontSize: 13, borderRadius: 6, background: '#111827', border: '1px solid #1f2937', color: '#e2e8f0' }}
+                  value={runOptions.defaultTimeoutMs / 1000}
+                  onChange={(event) => setRunOptions((current) => ({ ...current, defaultTimeoutMs: Number(event.target.value) * 1000 }))}
+                >
+                  <option value={5}>5 sec</option>
+                  <option value={10}>10 sec</option>
+                  <option value={20}>20 sec</option>
+                  <option value={30}>30 sec</option>
+                  <option value={60}>60 sec</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          {/* Test Cases Table */}
+          {cases.length > 0 ? (
+            <section className="card" style={{ padding: '22px 24px' }}>
+              <div className="card-heading" style={{ marginBottom: 18 }}>
+                <div>
+                  <div className="eyebrow">AUTOMATED TEST SUITE</div>
+                  <h2>Test Cases ({cases.length})</h2>
+                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                    Select cases to execute in batch or run individual tests.
+                  </p>
+                </div>
+                <button
+                  className="button button-primary"
+                  disabled={busy || selectedCaseIds.length === 0}
+                  onClick={() => runSelectedCases().catch((error) => setMessage(error.message))}
+                  style={{ padding: '10px 18px', fontSize: 14 }}
+                >
+                  <Play size={16} /> Run Selected ({selectedCaseIds.length})
+                </button>
+              </div>
+
+              <div className="table-wrap">
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #1e293b', textAlign: 'left', color: '#94a3b8' }}>
+                      <th style={{ padding: '12px 14px', width: 44 }}>
+                        <input
+                          aria-label="Select all test cases"
+                          type="checkbox"
+                          style={{ width: 16, height: 16, accentColor: '#21d4d8' }}
+                          checked={cases.length > 0 && selectedCaseIds.length === cases.length}
+                          onChange={(event) => setSelectedCaseIds(event.target.checked ? cases.map((item) => item.id) : [])}
+                        />
+                      </th>
+                      <th style={{ padding: '12px 14px' }}>ID / Case</th>
+                      <th style={{ padding: '12px 14px' }}>Priority & Tags</th>
+                      <th style={{ padding: '12px 14px' }}>Plan Steps</th>
+                      <th style={{ padding: '12px 14px' }}>Expected Outcome</th>
+                      <th style={{ padding: '12px 14px', textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cases.map((item) => {
+                      const needsApproval = item.plan?.actions?.some((action) => action.requiresApproval)
+                      const active = executions.some((run) => run.case_id === item.id && ['QUEUED', 'RUNNING'].includes(run.status))
+                      return (
+                        <tr key={item.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                          <td style={{ padding: '14px' }}>
+                            <input
+                              aria-label={'Select ' + item.case_key}
+                              type="checkbox"
+                              style={{ width: 16, height: 16, accentColor: '#21d4d8' }}
+                              disabled={active}
+                              checked={selectedCaseIds.includes(item.id)}
+                              onChange={(event) => setSelectedCaseIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))}
+                            />
+                          </td>
+                          <td style={{ padding: '14px' }}>
+                            <strong style={{ fontSize: 14, color: '#f8fafc', display: 'block' }}>{item.case_key}</strong>
+                            <span style={{ fontSize: 12, color: '#94a3b8' }}>{item.name}</span>
+                          </td>
+                          <td style={{ padding: '14px' }}>
+                            <span style={{ fontSize: 11, background: '#1e293b', padding: '3px 8px', borderRadius: 4, textTransform: 'capitalize', color: '#e2e8f0', fontWeight: 600 }}>
+                              {item.priority}
+                            </span>
+                            {item.tags?.length ? (
+                              <div style={{ marginTop: 4, fontSize: 11, color: '#64748b' }}>
+                                {item.tags.join(', ')}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td style={{ padding: '14px', maxWidth: 280 }}>
+                            <span style={{ fontSize: 12, color: '#38bdf8', fontWeight: 600 }}>
+                              {item.plan?.actions?.length || 0} automated actions
+                            </span>
+                            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {item.plan?.actions?.map((a) => a.action).join(' → ')}
+                            </div>
+                          </td>
+                          <td style={{ padding: '14px', fontSize: 12, color: '#cbd5e1' }}>
+                            {item.expected_result}
+                          </td>
+                          <td style={{ padding: '14px', textAlign: 'right' }}>
+                            <button
+                              className="button button-primary"
+                              disabled={busy || active}
+                              onClick={() => needsApproval ? (setApprovalCase(item), setApprovalChecked(false)) : runCase(item, false)}
+                              style={{ padding: '8px 14px', fontSize: 13 }}
+                            >
+                              {active ? (
+                                <>
+                                  <Loader2 size={14} className="spin" /> Running...
+                                </>
+                              ) : needsApproval ? (
+                                'Review & Approve'
+                              ) : (
+                                <>
+                                  <Play size={14} /> Run Test
+                                </>
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : (
+            <section className="card" style={{ padding: 48, textAlign: 'center' }}>
+              <FileSpreadsheet size={44} style={{ color: '#6366f1', margin: '0 auto 12px' }} />
+              <h3 style={{ fontSize: 18, color: '#f8fafc', margin: '0 0 8px' }}>No Test Suite Selected</h3>
+              <p style={{ color: '#94a3b8', fontSize: 14, maxWidth: 440, margin: '0 auto 20px' }}>
+                Select a test suite from the dropdown above to run cases, or switch to "Import CSV Cases" to create a new suite.
+              </p>
+              <button className="button button-secondary" onClick={() => setActiveTab('import')}>
+                <Upload size={15} /> Import a CSV Test Suite
+              </button>
+            </section>
+          )}
+
+          {/* Active / Selected Execution Details */}
+          {selectedExecution && (
+            <section className="card" style={{ padding: '24px' }}>
+              <div className="card-heading" style={{ marginBottom: 16 }}>
+                <div>
+                  <div className="eyebrow">EXECUTION DETAILS · {selectedExecution.id.slice(0, 8)}</div>
+                  <h2>{selectedExecution.case_key} · {selectedExecution.case_name}</h2>
+                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                    {selectedExecution.actual_outcome || selectedExecution.error_details || 'Execution in progress...'}
+                  </p>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <StatusBadge status={selectedExecution.status} />
+                  {['QUEUED', 'RUNNING'].includes(selectedExecution.status) && (
+                    <button className="button button-danger" onClick={() => cancelExecution().catch((error) => setMessage(error.message))}>
+                      Cancel Run
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {waitingForLogin && (
+                <div className="browser-test-auth-prompt" style={{ padding: 18, borderRadius: 10, marginBottom: 16 }}>
+                  <strong>Manual login is open in the isolated browser window.</strong>
+                  <span>Complete sign in in the browser window, then click resume below.</span>
+                  <button className="button button-primary" onClick={resumeLogin} style={{ marginTop: 8 }}>
+                    Resume After Manual Login
+                  </button>
+                </div>
+              )}
+
+              {selectedExecution.error_code && (
+                <div className="exploration-warning-box" style={{ padding: 14, borderRadius: 8, marginBottom: 14 }}>
+                  <strong>{selectedExecution.error_code}:</strong> {selectedExecution.error_details}
+                </div>
+              )}
+
+              {/* Artifacts Links */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, margin: '16px 0', padding: '14px', background: '#0b1120', borderRadius: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Film size={15} /> Artifacts:
+                </span>
+                {selectedExecution.artifacts?.length ? (
+                  selectedExecution.artifacts.map((artifact) => (
+                    <a
+                      key={artifact.id}
+                      className="button button-secondary"
+                      href={API + '/api/browser-tests/artifacts/' + artifact.id}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ padding: '6px 12px', fontSize: 12 }}
+                    >
+                      {artifact.kind === 'video' ? '▶ View Recording' : artifact.kind === 'screenshot' ? '📷 View Screenshot' : 'Download Trace'}
+                    </a>
+                  ))
+                ) : (
+                  <span style={{ fontSize: 12, color: '#64748b' }}>No video/screenshot generated yet.</span>
+                )}
+                <a
+                  className="button button-secondary"
+                  href={API + '/api/browser-tests/executions/' + selectedExecution.id + '/report'}
+                  download
+                  style={{ padding: '6px 12px', fontSize: 12, marginLeft: 'auto' }}
+                >
+                  Download Report JSON
+                </a>
+              </div>
+
+              {/* Step Results Table */}
+              {!!selectedExecution.steps?.length && (
+                <div className="table-wrap" style={{ marginTop: 14 }}>
+                  <table style={{ width: '100%', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
+                        <th style={{ padding: '10px 12px', width: 60 }}>Step</th>
+                        <th style={{ padding: '10px 12px' }}>Action</th>
+                        <th style={{ padding: '10px 12px' }}>Status</th>
+                        <th style={{ padding: '10px 12px' }}>Details / Error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedExecution.steps.map((step) => (
+                        <tr key={step.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                          <td style={{ padding: '10px 12px', fontWeight: 600 }}>{step.step_number}</td>
+                          <td style={{ padding: '10px 12px', color: '#38bdf8' }}>{step.action}</td>
+                          <td style={{ padding: '10px 12px' }}>
+                            <span style={{
+                              fontSize: 10,
+                              fontWeight: 700,
+                              padding: '2px 6px',
+                              borderRadius: 4,
+                              background: step.status === 'PASSED' ? '#14532d' : '#450a0a',
+                              color: step.status === 'PASSED' ? '#4ade80' : '#f87171'
+                            }}>
+                              {step.status}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 12px', color: '#94a3b8', fontFamily: 'monospace' }}>
+                            {step.error_details || JSON.stringify(step.actual || step.expected || '')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Recent Executions History Drawer */}
+          <section className="card" style={{ padding: '20px 24px' }}>
+            <div className="card-heading" style={{ marginBottom: 12 }}>
+              <div>
+                <div className="eyebrow">PERSISTED RUNS</div>
+                <h2>Recent Executions</h2>
+              </div>
+            </div>
+            {executions.length === 0 ? (
+              <div className="empty-recordings" style={{ minHeight: 120 }}>
+                <Activity size={24} />
+                <span>No executions yet. Run a test case above.</span>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+                {executions.slice(0, 12).map((run) => (
+                  <button
+                    key={run.id}
+                    className="browser-test-run"
+                    style={{
+                      padding: '12px 14px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      border: selectedExecution?.id === run.id ? '1px solid #38bdf8' : '1px solid #1e293b',
+                      borderRadius: 8,
+                      background: selectedExecution?.id === run.id ? '#13233e' : '#0b1120',
+                      cursor: 'pointer'
+                    }}
+                    onClick={() => loadExecution(run.id).catch((error) => setMessage(error.message))}
+                  >
+                    <div style={{ textAlign: 'left', minWidth: 0 }}>
+                      <strong style={{ fontSize: 13, color: '#f8fafc', display: 'block' }}>{run.case_key}</strong>
+                      <span style={{ fontSize: 11, color: '#94a3b8', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {run.case_name}
+                      </span>
+                    </div>
+                    <StatusBadge status={run.status} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {/* TAB 2: IMPORT CSV CASES */}
+      {activeTab === 'import' && (
+        <section className="card" style={{ padding: '24px 28px' }}>
+          <div className="card-heading" style={{ marginBottom: 16 }}>
+            <div>
+              <div className="eyebrow">TEST CASE IMPORT</div>
+              <h2>Import Test Cases from CSV</h2>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                Upload or edit a CSV containing deterministic test cases for your registered applications.
+              </p>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 18, marginBottom: 20 }}>
+            <div className="form-group">
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8' }}>Target Application</label>
+              <select
+                style={{ padding: '10px 14px', fontSize: 14, borderRadius: 8, background: '#111827', border: '1px solid #1f2937', color: '#f8fafc' }}
+                value={applicationId}
+                onChange={(event) => { setApplicationId(event.target.value); setPreview([]) }}
+              >
+                <option value="">Choose an application</option>
+                {applications.map((app) => <option key={app.id} value={app.id}>{app.name} · {app.base_url}</option>)}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8' }}>Suite Name</label>
+              <input
+                style={{ padding: '10px 14px', fontSize: 14, borderRadius: 8, background: '#111827', border: '1px solid #1f2937', color: '#f8fafc' }}
+                value={suiteName}
+                onChange={(event) => setSuiteName(event.target.value)}
+                placeholder="e.g. Oracle Fusion Smoke Tests"
+              />
+            </div>
+
+            <div className="form-group">
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8' }}>CSV File Upload</label>
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                style={{ padding: '8px 12px', fontSize: 13, borderRadius: 8, background: '#111827', border: '1px solid #1f2937', color: '#f8fafc' }}
+                onChange={(event) => previewFile(event.currentTarget.files?.[0])}
+              />
+            </div>
+          </div>
+
+          {/* Template Download Banner */}
+          <div style={{ padding: '14px 18px', background: '#0b1120', border: '1px solid #1e293b', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+            <div>
+              <strong style={{ fontSize: 14, color: '#f8fafc' }}>
+                {workflowTemplate ? `Recorded Template: ${workflowTemplate.workflow_name} (v${workflowTemplate.workflow_version})` : 'Standard Test Template'}
+              </strong>
+              <p style={{ margin: '2px 0 0', fontSize: 12, color: '#94a3b8' }}>
+                Download a pre-structured CSV template with matching column headers and sample data.
+              </p>
+            </div>
+            {workflowTemplate ? (
+              <a
+                className="button button-primary"
+                href={`data:text/csv;charset=utf-8,${encodeURIComponent(workflowTemplate.csv_template)}`}
+                download="chronos-recorded-workflow-template.csv"
+              >
+                Download ${workflowTemplate.workflow_name} CSV
+              </a>
+            ) : (
+              <a
+                className="button button-secondary"
+                href={`data:text/csv;charset=utf-8,${encodeURIComponent(browserTestCsvTemplate)}`}
+                download="chronos-browser-tests-template.csv"
+              >
+                Download CSV Template
+              </a>
+            )}
+          </div>
+
+          {/* Template Draft Editor if template exists */}
+          {workflowTemplate && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8', display: 'block', marginBottom: 6 }}>
+                Edit CSV Data Template
+              </label>
+              <textarea
+                value={workflowCsvDraft}
+                onChange={(event) => setWorkflowCsvDraft(event.target.value)}
+                rows={6}
+                spellCheck={false}
+                style={{ width: '100%', padding: 12, borderRadius: 8, background: '#0b1120', border: '1px solid #1f2937', color: '#e2e8f0', fontFamily: 'monospace', fontSize: 12 }}
+              />
+              <button
+                className="button button-secondary"
+                style={{ marginTop: 8 }}
+                disabled={busy || !applicationId}
+                onClick={() => previewCsvText(workflowCsvDraft, 'recorded-workflow.csv')}
+              >
+                Preview Edited Template
+              </button>
+            </div>
+          )}
+
+          {/* Preview Table */}
+          {preview.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <strong style={{ fontSize: 15, color: '#f8fafc' }}>
+                  Preview: {fileName} ({preview.length} rows)
+                </strong>
+                {previewIsValid && (
+                  <button className="button button-primary" disabled={busy} onClick={importSuite}>
+                    {busy ? 'Importing...' : `Import ${selectedPreviewIds.length} Valid Cases`}
+                  </button>
+                )}
+              </div>
+
+              <div className="table-wrap">
+                <table style={{ width: '100%', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
+                      <th style={{ padding: 10, width: 40 }}>Select</th>
+                      <th style={{ padding: 10 }}>Row / ID</th>
+                      <th style={{ padding: 10 }}>Case Name</th>
+                      <th style={{ padding: 10 }}>Priority</th>
+                      <th style={{ padding: 10 }}>Actions</th>
+                      <th style={{ padding: 10 }}>Validation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.map((row) => (
+                      <tr key={row.rowNumber} style={{ borderBottom: '1px solid #1e293b' }}>
+                        <td style={{ padding: 10 }}>
+                          <input
+                            type="checkbox"
+                            aria-label={'Select CSV row ' + row.rowNumber}
+                            disabled={row.errors.length > 0}
+                            checked={selectedPreviewIds.includes(row.testCaseId)}
+                            onChange={(event) => setSelectedPreviewIds((current) => event.target.checked ? [...current, row.testCaseId] : current.filter((id) => id !== row.testCaseId))}
+                          />
+                        </td>
+                        <td style={{ padding: 10 }}>{row.rowNumber} · {row.testCaseId}</td>
+                        <td style={{ padding: 10 }}><strong>{row.name}</strong></td>
+                        <td style={{ padding: 10 }}>{row.priority}</td>
+                        <td style={{ padding: 10 }}>{row.stepCount} steps</td>
+                        <td style={{ padding: 10 }}>
+                          {row.errors.length ? (
+                            <span style={{ color: '#ef4444' }}>{row.errors.join('; ')}</span>
+                          ) : (
+                            <span style={{ color: '#22c55e' }}>Valid</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {previewErrors.length > 0 && (
+            <ul className="browser-test-errors" style={{ marginTop: 14 }}>
+              {previewErrors.slice(0, 15).map((error, index) => <li key={index}>{error}</li>)}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {/* TAB 3: RULE SYNTAX & DOCS */}
+      {activeTab === 'docs' && (
+        <section className="card" style={{ padding: '24px 28px' }}>
+          <div className="card-heading" style={{ marginBottom: 14 }}>
+            <div>
+              <div className="eyebrow">DETERMINISTIC ACTION TEMPLATES</div>
+              <h2>Supported Rule Syntax · Plan Version 1.0</h2>
+            </div>
+          </div>
+          <pre style={{ padding: 18, borderRadius: 8, background: '#080e19', border: '1px solid #1e293b', color: '#b9f6e2', fontSize: 13, lineHeight: 1.8, overflow: 'auto' }}>
+{`navigate: /path
+click role=button[name="Continue"]
+fill label="Email" <- \${test_data.email}
+select label="Country" <- \${test_data.country}
+check label="Accept terms"
+uncheck label="Subscribe"
+create role=button[name="Create"]
+update role=button[name="Save"]
+delete role=button[name="Delete"]
+wait visible text="Ready" timeout=5000
+read text="Result" as result
+assert visible role=heading[name="Dashboard"]
+assert text text="Status" contains "Complete"
+assert url contains "/home"`}
+          </pre>
+          <p style={{ marginTop: 12, fontSize: 13, color: '#94a3b8', lineHeight: 1.6 }}>
+            Interactive steps like <code>create</code>, <code>update</code>, and <code>delete</code> require per-run explicit approval and assertions to maintain security and integrity.
+          </p>
+        </section>
+      )}
+
+      {/* Approval Modal */}
+      {approvalCase && (
+        <div className="modal-backdrop browser-test-approval-backdrop">
+          <section className="card browser-test-approval" role="dialog" aria-modal="true" aria-label="Approve interactive browser test" style={{ maxWidth: 640, width: '100%', padding: 26 }}>
+            <div className="modal-heading" style={{ marginBottom: 14 }}>
+              <div>
+                <div className="eyebrow">RUN APPROVAL</div>
+                <h2>{approvalCase.case_key} · {approvalCase.name}</h2>
+              </div>
+              <button className="icon-button" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>
+                <X size={18} />
+              </button>
+            </div>
+            <p style={{ fontSize: 14, color: '#cbd5e1', lineHeight: 1.6 }}>
+              {approvalHasWrites
+                ? 'This run includes application writes. Review each operation and explicitly enable writes for this run. Requests remain strictly restricted to the registered application origin.'
+                : 'This plan clicks or changes form controls. Review the steps and approve this single run.'}
+            </p>
+            <ol className="browser-test-plan" style={{ margin: '14px 0', paddingLeft: 22, color: '#93c5fd', fontSize: 13, lineHeight: 1.7 }}>
+              {approvalActions.map((action, index) => (
+                <li key={index}>
+                  <strong>{action.action}</strong>{action.locator ? ' · ' + (action.locator.name || action.locator.value || action.locator.kind) : ''}{action.action === 'delete' ? ' · (deletes a record)' : ''}
+                </li>
+              ))}
+            </ol>
+            <label className="browser-test-approve-check" style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0', fontSize: 13, color: '#f8fafc', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                style={{ width: 18, height: 18, accentColor: '#21d4d8' }}
+                checked={approvalChecked}
+                onChange={(event) => setApprovalChecked(event.target.checked)}
+              />
+              <span>{approvalHasDelete ? 'Enable writes and authorize deletion.' : approvalHasWrites ? 'Enable writes and authorize create/update actions.' : 'I approve the interactive steps in this test run.'}</span>
+            </label>
+            <div className="browser-test-approval-actions" style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+              <button className="button button-secondary" onClick={() => { setApprovalCase(null); setQueuedCases([]) }}>
+                Cancel
+              </button>
+              <button className="button button-primary" disabled={!approvalChecked || busy} onClick={approveQueuedCase}>
+                Approve and Run Once
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </motion.div>
+  )
 }
 
 export default App

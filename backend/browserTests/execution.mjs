@@ -709,11 +709,13 @@ export async function executeBrowserTest(executionId, options = {}) {
     const shouldRunHeadless = typeof options.headless === 'boolean'
       ? options.headless
       : (process.env.HEADLESS === 'false' ? false : (app.application_auth_method === 'manual' && !cachedStorageState ? false : process.env.HEADLESS === 'true'))
+    console.log("[Chronos Runner] Launching browser for execution " + runId + " (headless: " + shouldRunHeadless + ")")
     const launchOptions = {
       headless: shouldRunHeadless,
+      slowMo: shouldRunHeadless ? 0 : 350,
       timeout: 20_000,
       proxy: { server: proxy.proxyUrl, bypass: '<-loopback>' },
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--new-window', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
     }
     // Match the manual recorder's browser engine on Windows; Oracle's responsive
     // Redwood controls can render differently in bundled Chromium.
@@ -1359,6 +1361,7 @@ export async function executeBrowserTest(executionId, options = {}) {
       durationMs: Date.now() - startedMs,
     }).catch(() => {})
   } finally {
+    if (!shouldRunHeadless && page) { await page.waitForTimeout(2500).catch(() => {}) }
     if (page) await page.close().catch(() => {})
     if (context) await context.close().catch(() => {})
     if (!videoPersisted && page?.video() && outputDirectory) videoPath = await page.video().path().catch(() => null)

@@ -1107,6 +1107,34 @@ export async function persistBrowserTestArtifact({ id, executionId, kind, relati
   return result.rows[0]
 }
 
+export async function listAllBrowserTestArtifacts(limit = 100) {
+  const database = getDatabasePool()
+  const result = await database.query(
+    `SELECT 
+       a.id,
+       a.execution_id,
+       a.kind,
+       a.relative_path,
+       a.content_type,
+       a.size_bytes,
+       a.created_at,
+       e.status AS execution_status,
+       e.case_id,
+       c.case_key,
+       c.name AS case_name,
+       s.name AS suite_name,
+       app.name AS application_name
+     FROM browser_test_artifacts a
+     JOIN browser_test_executions e ON e.id = a.execution_id
+     JOIN browser_test_cases c ON c.id = e.case_id
+     JOIN browser_test_suites s ON s.id = e.suite_id
+     JOIN applications app ON app.id = e.application_id
+     ORDER BY a.created_at DESC LIMIT $1`,
+    [Math.max(1, Math.min(500, Number(limit) || 100))]
+  )
+  return result.rows
+}
+
 export async function getBrowserTestArtifactById(id) {
   const database = getDatabasePool()
   const result = await database.query('SELECT * FROM browser_test_artifacts WHERE id = $1', [id])
