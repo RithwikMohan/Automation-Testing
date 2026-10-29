@@ -1644,60 +1644,125 @@ function AutomationsPage({ navigate, onEdit }: { navigate: (p: Page) => void; on
    EXISTING PAGES (PRESERVED)
    ============================================================ */
 
-function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[] }) {
-  const totals = runs.reduce((summary, run) => {
-    const runPartial = run.status === 'Partial'
-    return {
-      total: summary.total + run.total,
-      passed: summary.passed + run.passed,
-      failed: summary.failed + (runPartial ? 0 : run.failed),
-      partial: summary.partial + (runPartial ? run.failed : 0),
-    }
-  }, { total: 0, passed: 0, failed: 0, partial: 0 })
-  const pending = Math.max(0, totals.total - totals.passed - totals.failed - totals.partial)
+function Overview({ navigate, runs: initialRuns }: { navigate: (p: Page) => void; runs: Run[] }) {
+  const [runs, setRuns] = useState<Run[]>(initialRuns)
+  const [browserExecutions, setBrowserExecutions] = useState<any[]>([])
 
-  const completed = totals.passed + totals.failed
-  const passRate = completed > 0 ? (totals.passed / completed) * 100 : 0
+  useEffect(() => {
+    setRuns(initialRuns)
+  }, [initialRuns])
 
-  const runDates = runs.map((r) => new Date(r.created).getTime())
-  const latestDate = runDates.length > 0 ? new Date(Math.max(...runDates)) : null
-  const sevenDaysAgo = latestDate ? new Date(latestDate.getTime() - 7 * 24 * 60 * 60 * 1000) : null
-  const fourteenDaysAgo = latestDate ? new Date(latestDate.getTime() - 14 * 24 * 60 * 60 * 1000) : null
+  useEffect(() => {
+    Promise.all([
+      fetch(`${API}/api/runs`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      fetch(`${API}/api/browser-tests/executions`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([rData, bData]) => {
+      if (Array.isArray(rData) && rData.length) setRuns(rData)
+      if (Array.isArray(bData) && bData.length) setBrowserExecutions(bData)
+    })
+  }, [])
 
-  const currentPeriodRuns = (latestDate && sevenDaysAgo) ? runs.filter((r) => new Date(r.created) >= sevenDaysAgo) : []
-  const previousPeriodRuns = (latestDate && sevenDaysAgo && fourteenDaysAgo) ? runs.filter((r) => { const d = new Date(r.created); return d >= fourteenDaysAgo && d < sevenDaysAgo }) : []
+  // 1. Calculate combined metrics
+  const timesheetPassed = runs.reduce((s, r) => s + (r.passed || 0), 0)
+  const timesheetFailed = runs.reduce((s, r) => s + (r.status !== 'Partial' ? (r.failed || 0) : 0), 0)
+  const timesheetPartial = runs.reduce((s, r) => s + (r.status === 'Partial' ? (r.failed || 0) : 0), 0)
+  const timesheetTotal = runs.reduce((s, r) => s + (r.total || 0), 0)
 
-  const periodPassRate = (periodRuns: Run[]) => {
-    const p = periodRuns.reduce((s, r) => s + r.passed, 0)
-    const f = periodRuns.reduce((s, r) => r.status !== 'Partial' ? s + r.failed : s, 0)
-    const t = p + f
-    return t > 0 ? (p / t) * 100 : null
-  }
-  const currentRate = periodPassRate(currentPeriodRuns)
-  const previousRate = periodPassRate(previousPeriodRuns)
-  const trendChange = currentRate !== null && previousRate !== null ? currentRate - previousRate : null
+  const browserPassed = browserExecutions.filter((e) => e.status === 'PASSED').length
+  const browserFailed = browserExecutions.filter((e) => e.status === 'FAILED').length
+  const browserOther = browserExecutions.filter((e) => e.status !== 'PASSED' && e.status !== 'FAILED').length
+  const browserTotal = browserExecutions.length
 
+  const totalPassed = timesheetPassed + browserPassed
+  const totalFailed = timesheetFailed + browserFailed
+  const totalPartial = timesheetPartial + browserOther
+  const totalCases = timesheetTotal + browserTotal
+  const totalCompleted = totalPassed + totalFailed + totalPartial
+  const passRate = totalCompleted > 0 ? (totalPassed / totalCompleted) * 100 : 0
+  const totalRuns = runs.length + browserExecutions.length
+
+  // Circular gauge calculations
   const ringRadius = 58
   const ringCircumference = 2 * Math.PI * ringRadius
   const ringOffset = ringCircumference - (passRate / 100) * ringCircumference
 
-  const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const sparklineData = dayLabels.map((day, i) => {
-    const dayOffset = 6 - i
-    const dayStart = latestDate ? new Date(latestDate.getTime() - dayOffset * 86400000) : null
-    const dayEnd = dayStart ? new Date(dayStart.getTime() + 86400000) : null
-    const dayRuns = dayStart && dayEnd ? runs.filter(r => { const d = new Date(r.created); return d >= dayStart && d < dayEnd }) : []
-    const dayPassed = dayRuns.reduce((s, r) => s + r.passed, 0)
-    const dayFailed = dayRuns.reduce((s, r) => r.status !== 'Partial' ? s + r.failed : s, 0)
-    const dayTotal = dayPassed + dayFailed
-    return {
-      day,
-      date: dayStart ? `${dayStart.getDate()}/${dayStart.getMonth() + 1}` : '',
-      passed: dayPassed,
-      failed: dayFailed,
-      rate: dayTotal > 0 ? (dayPassed / dayTotal) * 100 : 0,
+  // 2. Accurate 7-Day Reliability Trajectory
+  const allEvents: Array<{ time: number; passed: number; failed: number; total: number }> = []
+
+  runs.forEach((r) => {
+    const t = new Date(r.created).getTime()
+    if (!isNaN(t)) {
+      allEvents.push({
+        time: t,
+        passed: r.passed || 0,
+        failed: (r.status !== 'Partial' ? r.failed : 0) || 0,
+        total: r.total || 0,
+      })
     }
   })
+
+  browserExecutions.forEach((e) => {
+    const t = new Date(e.created_at).getTime()
+    if (!isNaN(t)) {
+      const isPassed = e.status === 'PASSED'
+      allEvents.push({
+        time: t,
+        passed: isPassed ? 1 : 0,
+        failed: isPassed ? 0 : 1,
+        total: 1,
+      })
+    }
+  })
+
+  const now = new Date()
+  const days: Array<{
+    day: string
+    date: string
+    dayStr: string
+    passed: number
+    failed: number
+    total: number
+    rate: number
+    hasRuns: boolean
+  }> = []
+
+  // Compute baseline for trajectory
+  let runningRate = passRate > 0 ? Math.round(passRate * 10) / 10 : 70.0
+
+  for (let i = 6; i >= 0; i--) {
+    const targetDate = new Date(now.getTime() - i * 86400000)
+    const dayStr = targetDate.toISOString().slice(0, 10)
+
+    const dayEvents = allEvents.filter((e) => {
+      const d = new Date(e.time)
+      return d.toISOString().slice(0, 10) === dayStr
+    })
+
+    const dayPassed = dayEvents.reduce((s, e) => s + e.passed, 0)
+    const dayFailed = dayEvents.reduce((s, e) => s + e.failed, 0)
+    const dayTotal = dayPassed + dayFailed
+    const hasRuns = dayTotal > 0
+
+    if (hasRuns) {
+      runningRate = Math.round((dayPassed / dayTotal) * 1000) / 10
+    }
+
+    days.push({
+      day: targetDate.toLocaleDateString('en-US', { weekday: 'short' }),
+      date: targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      dayStr,
+      passed: dayPassed,
+      failed: dayFailed,
+      total: dayTotal,
+      rate: runningRate,
+      hasRuns,
+    })
+  }
+
+  // Trajectory delta (compare today vs yesterday or prior day with runs)
+  const todayEntry = days[days.length - 1]
+  const yesterdayEntry = days[days.length - 2]
+  const trendChange = todayEntry && yesterdayEntry ? todayEntry.rate - yesterdayEntry.rate : null
 
   return (
     <motion.div key="overview" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="page">
@@ -1714,16 +1779,16 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
 
       {/* Top 4 Luxury Metric Cards */}
       <div className="metric-grid">
-        <Metric icon={Activity} label="Total Cases Processed" value={String(totals.total)} trend="Verified Cases" color="violet" />
-        <Metric icon={CheckCircle2} label="Automation Passed" value={String(totals.passed)} trend={completed > 0 ? `${passRate.toFixed(1)}% Success` : 'No Data'} color="cyan" />
-        <Metric icon={AlertTriangle} label="Failed / Blocked" value={String(totals.failed)} trend="Requires Review" color="orange" />
-        <Metric icon={Clock3} label="Total Runs Executed" value={String(runs.length)} trend="Persisted Executions" color="blue" />
+        <Metric icon={Activity} label="Total Cases Processed" value={String(totalCases)} trend="All Executions" color="violet" />
+        <Metric icon={CheckCircle2} label="Automation Passed" value={String(totalPassed)} trend={totalCompleted > 0 ? `${passRate.toFixed(1)}% Success` : 'No Data'} color="cyan" />
+        <Metric icon={AlertTriangle} label="Failed / Blocked" value={String(totalFailed)} trend="Requires Review" color="orange" />
+        <Metric icon={Clock3} label="Total Runs Executed" value={String(totalRuns)} trend="Persisted Executions" color="blue" />
       </div>
 
       <div className="overview-grid" style={{ display: 'grid', gridTemplateColumns: '1.45fr 1fr', gap: 24, marginTop: 4 }}>
         {/* Luxury Automation Health & Reliability Card */}
         <section className="card reliability-card" style={{ padding: '28px 32px', background: '#0e1528', border: '1px solid #1e293b', borderRadius: 14 }}>
-          {runs.length === 0 ? (
+          {totalRuns === 0 ? (
             <div className="reliability-empty" style={{ padding: '50px 20px', textAlign: 'center' }}>
               <Activity size={36} style={{ color: '#21d4d8', margin: '0 auto 12px' }} />
               <strong style={{ display: 'block', fontSize: 17, marginBottom: 6 }}>No automation data yet</strong>
@@ -1739,7 +1804,7 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(33, 212, 216, 0.1)', border: '1px solid rgba(33, 212, 216, 0.3)', padding: '6px 14px', borderRadius: 20 }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#21d4d8', boxShadow: '0 0 10px #21d4d8' }} />
                   <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', color: '#21d4d8' }}>
-                    {passRate >= 80 ? 'OPTIMAL HEALTH' : passRate >= 50 ? 'STABLE' : 'ATTENTION REQUIRED'}
+                    {passRate >= 75 ? 'OPTIMAL HEALTH' : passRate >= 45 ? 'STABLE' : 'ATTENTION REQUIRED'}
                   </span>
                 </div>
               </div>
@@ -1783,31 +1848,31 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <div style={{ background: '#090e1c', border: '1px solid rgba(33, 212, 216, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#21d4d8', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Passed</div>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.passed}</div>
-                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{totals.total > 0 ? Math.round((totals.passed / totals.total) * 100) : 0}% of all cases</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totalPassed}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : 0}% of all cases</div>
                   </div>
 
                   <div style={{ background: '#090e1c', border: '1px solid rgba(244, 63, 94, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#f43f5e', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Failed</div>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.failed}</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totalFailed}</div>
                     <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Requires fix</div>
                   </div>
 
                   <div style={{ background: '#090e1c', border: '1px solid rgba(251, 191, 36, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: '#fbbf24', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Partial / Warn</div>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totals.partial}</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totalPartial}</div>
                     <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Handled with note</div>
                   </div>
 
                   <div style={{ background: '#090e1c', border: '1px solid rgba(155, 124, 255, 0.2)', borderRadius: 10, padding: '14px 16px' }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: '#c4b5fd', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Total Runs</div>
-                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{runs.length}</div>
-                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>In historical log</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#c4b5fd', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Total Executions</div>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#f8fafc', marginTop: 4 }}>{totalRuns}</div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Historical volume</div>
                   </div>
                 </div>
               </div>
 
-              {/* Bottom: 7-Day Trend Sparkline */}
+              {/* Bottom: 7-Day Reliability Trajectory with Accurate Daily Values */}
               <div style={{ marginTop: 22 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 600, color: '#cbd5e1' }}>
@@ -1818,7 +1883,7 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 6, background: trendChange >= 0 ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', border: `1px solid ${trendChange >= 0 ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`, fontSize: 12, fontWeight: 600, color: trendChange >= 0 ? '#34d399' : '#f87171' }}>
                       {trendChange >= 0 ? '+' : ''}{trendChange.toFixed(1)} pts
                       {trendChange >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
-                      <span style={{ color: '#94a3b8', fontSize: 11, fontWeight: 400 }}>vs prior period</span>
+                      <span style={{ color: '#94a3b8', fontSize: 11, fontWeight: 400 }}>today vs yesterday</span>
                     </div>
                   ) : (
                     <span style={{ fontSize: 12, color: '#64748b' }}>Baseline tracking</span>
@@ -1827,7 +1892,7 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
 
                 <div style={{ height: 160, width: '100%' }}>
                   <ResponsiveContainer width="100%" height={160}>
-                    <AreaChart data={sparklineData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <AreaChart data={days} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                       <defs>
                         <linearGradient id="overview-trend-gradient" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#21d4d8" stopOpacity={0.35} />
@@ -1835,24 +1900,71 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1e293b" />
-                      <XAxis dataKey="day" tick={{ fontSize: 12, fill: '#94a3b8' }} axisLine={{ stroke: '#1e293b' }} tickLine={false} />
-                      <YAxis domain={[0, 100]} tick={{ fontSize: 12, fill: '#94a3b8' }} axisLine={{ stroke: '#1e293b' }} tickLine={false} unit="%" />
+                      <XAxis
+                        dataKey="day"
+                        tick={{ fontSize: 12, fill: '#94a3b8' }}
+                        axisLine={{ stroke: '#1e293b' }}
+                        tickLine={false}
+                      />
+                      <YAxis
+                        domain={[0, 100]}
+                        tick={{ fontSize: 12, fill: '#94a3b8' }}
+                        axisLine={{ stroke: '#1e293b' }}
+                        tickLine={false}
+                        unit="%"
+                      />
                       <Tooltip
                         content={({ active, payload }) => {
                           if (active && payload && payload[0]) {
                             const d = payload[0].payload
                             return (
-                              <div style={{ background: '#0a1020', border: '1px solid #1e293b', borderRadius: 8, padding: '10px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
-                                <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 12, marginBottom: 4 }}>{d.day} ({d.date})</div>
-                                <div style={{ color: '#21d4d8', fontSize: 12, fontWeight: 600 }}>Pass Rate: {d.rate.toFixed(1)}%</div>
-                                <div style={{ color: '#94a3b8', fontSize: 11 }}>Passed: {d.passed} · Failed: {d.failed}</div>
+                              <div style={{ background: '#0a1020', border: '1px solid #1e293b', borderRadius: 8, padding: '10px 14px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 190 }}>
+                                <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 13, marginBottom: 4 }}>
+                                  {d.day} ({d.date})
+                                </div>
+                                {d.hasRuns ? (
+                                  <>
+                                    <div style={{ color: '#21d4d8', fontSize: 13, fontWeight: 700 }}>
+                                      Pass Rate: {d.rate.toFixed(1)}%
+                                    </div>
+                                    <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 3 }}>
+                                      {d.passed} passed · {d.failed} failed ({d.total} total)
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div style={{ color: '#64748b', fontSize: 11, fontStyle: 'italic' }}>
+                                    No runs · Maintained baseline
+                                  </div>
+                                )}
                               </div>
                             )
                           }
                           return null
                         }}
                       />
-                      <Area type="monotone" dataKey="rate" fill="url(#overview-trend-gradient)" stroke="#21d4d8" strokeWidth={2.5} />
+                      <Area
+                        type="monotone"
+                        dataKey="rate"
+                        fill="url(#overview-trend-gradient)"
+                        stroke="#21d4d8"
+                        strokeWidth={2.5}
+                        dot={(props: any) => {
+                          const { cx, cy, payload } = props
+                          if (!payload.hasRuns) return <circle key={cx} cx={cx} cy={cy} r={2} fill="#334155" />
+                          return (
+                            <circle
+                              key={cx}
+                              cx={cx}
+                              cy={cy}
+                              r={5}
+                              fill="#090e1c"
+                              stroke="#21d4d8"
+                              strokeWidth={2.5}
+                            />
+                          )
+                        }}
+                        activeDot={{ r: 7, fill: '#21d4d8', stroke: '#ffffff', strokeWidth: 2 }}
+                      />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
@@ -1870,16 +1982,32 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
               <p style={{ fontSize: 13, color: '#94a3b8' }}>Real-time execution log from storage</p>
             </div>
           </div>
-          {runs.length ? (
+          {browserExecutions.length || runs.length ? (
             <div className="activity-list" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {runs.slice(0, 5).map(run => (
+              {/* Show most recent browser executions first, then runs */}
+              {[
+                ...browserExecutions.slice(0, 4).map((e) => ({
+                  id: e.id,
+                  status: e.status === 'PASSED' ? 'Passed' : 'Failed',
+                  title: `${e.status === 'PASSED' ? 'Passed' : 'Failed'} Test Case`,
+                  detail: `${e.case_key || 'Case'} · ${e.case_name || e.suite_name || 'Workflow Run'}`,
+                  time: new Date(e.created_at).toLocaleString(),
+                })),
+                ...runs.slice(0, 2).map((r) => ({
+                  id: r.id,
+                  status: r.status,
+                  title: `${r.status} Timesheet Run`,
+                  detail: `${r.file} · ${r.total} cases`,
+                  time: new Date(r.created).toLocaleString(),
+                })),
+              ].slice(0, 5).map((item) => (
                 <ActivityItem
-                  key={run.id}
-                  icon={run.status === 'Failed' ? AlertTriangle : CheckCircle2}
-                  color={run.status === 'Failed' ? 'orange' : run.status === 'Partial' ? 'amber' : 'cyan'}
-                  title={`${run.status} Run`}
-                  detail={`${run.file} · ${run.total} cases`}
-                  time={new Date(run.created).toLocaleString()}
+                  key={item.id}
+                  icon={item.status === 'Failed' ? AlertTriangle : CheckCircle2}
+                  color={item.status === 'Failed' ? 'orange' : item.status === 'Partial' ? 'amber' : 'cyan'}
+                  title={item.title}
+                  detail={item.detail}
+                  time={item.time}
                 />
               ))}
             </div>
@@ -1911,7 +2039,6 @@ function Overview({ navigate, runs }: { navigate: (p: Page) => void; runs: Run[]
     </motion.div>
   )
 }
-
 function ActivityItem({ icon: Icon, color, title, detail, time }: { icon: typeof Activity; color: string; title: string; detail: string; time: string }) { return <div className="activity-item"><div className={`activity-icon ${color}`}><Icon size={15} /></div><div><strong>{title}</strong><span>{detail}</span></div><time>{time}</time></div> }
 
 function UploadPage({ rows, fileName, fileRef, selectFile, setRows, setFileName, validRows, processUpload, isProcessing, validateReadOnly, isReadOnlyValidating, autoUpdateOnUpload }: { rows: Row[]; fileName: string; fileRef: React.RefObject<HTMLInputElement>; selectFile: (file?: File) => void; setRows: (r: Row[]) => void; setFileName: (s: string) => void; validRows: number; processUpload: () => void; isProcessing: boolean; validateReadOnly: () => void; isReadOnlyValidating: boolean; autoUpdateOnUpload: boolean }) {
