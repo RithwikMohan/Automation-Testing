@@ -712,20 +712,31 @@ export async function executeBrowserTest(executionId, options = {}) {
     console.log("[Chronos Runner] Launching browser for execution " + runId + " (headless: " + shouldRunHeadless + ")")
     const launchOptions = {
       headless: shouldRunHeadless,
-      slowMo: shouldRunHeadless ? 0 : 350,
-      timeout: 20_000,
+      slowMo: shouldRunHeadless ? 0 : 400,
+      timeout: 30_000,
       proxy: { server: proxy.proxyUrl, bypass: '<-loopback>' },
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-quic', '--dns-prefetch-disable', '--disable-background-networking', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--new-window', '--start-maximized', '--proxy-bypass-list=<-loopback>', '--proxy-server=' + proxy.proxyUrl],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-quic',
+        '--dns-prefetch-disable',
+        '--disable-background-networking',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+        '--new-window',
+        '--start-maximized',
+        '--window-position=0,0',
+        '--proxy-bypass-list=<-loopback>',
+        '--proxy-server=' + proxy.proxyUrl,
+      ],
     }
-    // Match the manual recorder's browser engine on Windows; Oracle's responsive
-    // Redwood controls can render differently in bundled Chromium.
-    if (process.platform === 'win32') {
+    // Launch Playwright's dedicated Chromium browser for visible execution
+    if (process.env.BROWSER_ENGINE === 'chrome') {
       try { browser = await chromium.launch({ ...launchOptions, channel: 'chrome' }) }
-      catch (error) {
-        if (!/chrome.*(?:not found|not installed)|executable doesn't exist/i.test(String(error?.message || error))) throw error
-        browser = await chromium.launch(launchOptions)
-      }
-    } else browser = await chromium.launch(launchOptions)
+      catch { browser = await chromium.launch(launchOptions) }
+    } else {
+      browser = await chromium.launch(launchOptions)
+    }
     context = await browser.newContext({
       ignoreHTTPSErrors: false,
       // Keep Oracle's responsive layout aligned with the manual workflow

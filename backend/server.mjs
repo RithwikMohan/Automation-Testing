@@ -268,9 +268,16 @@ async function validateLogin({ username, password, caseId, updateRows, persist =
   const artifactDir = join(artifactRoot, jobId)
   await mkdir(artifactDir, { recursive: true })
 
+  const shouldRunHeadless = process.env.HEADLESS === 'true'
   const browser = await chromium.launch({
-    headless: process.env.HEADLESS !== 'false',
-    args: ['--disable-blink-features=AutomationControlled'],
+    headless: shouldRunHeadless,
+    slowMo: shouldRunHeadless ? 0 : 400,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--new-window',
+      '--start-maximized',
+      '--window-position=0,0',
+    ],
   })
   const context = await browser.newContext({
     recordVideo: { dir: artifactDir, size: { width: 1440, height: 900 } },
@@ -281,6 +288,7 @@ async function validateLogin({ username, password, caseId, updateRows, persist =
     Object.defineProperty(navigator, 'webdriver', { get: () => false })
   })
   const page = await context.newPage()
+  if (!shouldRunHeadless) { await page.bringToFront().catch(() => {}) }
   page.setDefaultTimeout(60_000)
   const networkEvents = []
   page.on('request', (request) => {

@@ -3145,7 +3145,8 @@ function BrowserTestsPage() {
                   checked={runOptions.headed}
                   onChange={(event) => setRunOptions((current) => ({ ...current, headed: event.target.checked }))}
                 />
-                <strong>Show browser window (live Chrome automation)</strong>
+                <strong>Show Chromium browser window (Live automation)</strong>
+                <span style={{ fontSize: 11, padding: '2px 7px', borderRadius: 4, background: 'rgba(33, 212, 216, 0.15)', color: '#21d4d8', border: '1px solid rgba(33, 212, 216, 0.3)' }}>VISIBLE CHROMIUM</span>
               </label>
 
               <label className="browser-test-approve-check" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#f1f5f9', cursor: 'pointer' }}>
